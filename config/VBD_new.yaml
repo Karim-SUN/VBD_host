@@ -23,6 +23,11 @@ agents_len: 32
 future_len: 80
 action_len: 2
 encoder_layers: 6
+
+# Encoder
+history_dropout: 0.4
+
+# Predictor
 #prediction_type: sample
 prediction_type: sample
 encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention

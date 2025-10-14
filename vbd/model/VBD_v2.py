@@ -56,7 +56,11 @@ class VBD(pl.LightningModule):
         self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
         self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
 
-        self.encoder = Encoder(self._encoder_layers, version=self._encoder_version)
+        self.encoder = Encoder(
+            self._encoder_layers,
+            version=self._encoder_version,
+            history_dropout=cfg.get('history_dropout', 0.2)
+        )
 
         self.denoiser = Denoiser(
             future_len=self._future_len,

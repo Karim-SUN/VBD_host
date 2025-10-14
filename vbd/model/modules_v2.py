@@ -12,7 +12,7 @@ from .model_utils_new import get_random_mask
 
 
 class Encoder(nn.Module):
-    def __init__(self, layers=6, version='v1'):
+    def __init__(self, layers=6, version='v1', history_dropout=0.2):
         super().__init__()
         self._version = version
         if self._version == 'v1':
@@ -25,6 +25,7 @@ class Encoder(nn.Module):
         self.traffic_light_encoder = TrafficLightEncoder()
         self.relation_encoder = FourierEmbedding(input_dim=3)
         self.transformer_encoder = TransformerEncoder(layers=layers)
+        self.history_dropout = history_dropout
 
     def forward(self, inputs):
         # agent encoding
@@ -37,6 +38,17 @@ class Encoder(nn.Module):
         agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur)
 
         B, A_all, T_all, D_all = agents_local.shape
+
+        # --- State Dropout: 按时间戳随机丢弃历史状态 ---
+        if self.training and self.history_dropout > 0:
+            history_len = T_history_and_cur - 1
+            if history_len > 0:
+                # 创建一个时间步遮罩，形状为 [B, 1, history_len, 1]
+                # torch.rand > self.history_dropout 的结果是保留为True(1.0)，丢弃为False(0.0)
+                time_mask = (torch.rand(B, 1, history_len, 1, device=agents_local.device) > self.history_dropout).float()
+                # 应用遮罩到历史轨迹部分
+                agents_local[:, :, :history_len, :] *= time_mask
+
         multi_task_mask, mask_type = get_random_mask(B, A_all, T_all, T_history_and_cur)
         agents_mask = torch.eq(agents_interested, 0)
         multi_task_mask[agents_mask.unsqueeze(-1).repeat(1, 1, T_all).bool()] = True
