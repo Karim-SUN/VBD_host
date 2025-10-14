@@ -254,6 +254,4 @@ class WaymaxTestDataset(WaymaxDataset):
     
     def __getitem__(self, idx):
         _, _, data_dict = self.get_scenario_by_index(idx)
-        return data_dict       
-    
-    
+        return data_dict

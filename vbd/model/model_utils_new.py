@@ -493,16 +493,16 @@ def get_random_mask(B, A, T, T0, reactive_agents_num=4):
     type = torch.zeros((B, A), dtype=torch.long).to("cuda")
     for i in range(B):
         p = torch.rand(1).item()
-        if p < 0.9999:
+        if p < 0.7:
             # Prediction
             mask[i, :, :T0] = 0
             type[i, :] = 1
-        elif p < 0.0002:
+        elif p < 0.8:
             # Goal Conditioned
             mask[i, :, :T0] = 0
             mask[i, :, -1] = 0
             type[i, :] = 2
-        elif p < 0.0003:
+        elif p < 0.9:
             # Agent Reactive
             num_selected_agents = min(reactive_agents_num, A)
             selected_agents = torch.randperm(A)[:num_selected_agents]

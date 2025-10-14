@@ -17,8 +17,10 @@ class Encoder(nn.Module):
         self._version = version
         if self._version == 'v1':
             self.agent_encoder = AgentEncoder()
-        else:
+        elif self._version == 'v2':
             self.agent_encoder = AgentEncoderV2()
+        else:
+            self.agent_encoder = AgentEncoderTemporalAttn()
         self.map_encoder = MapEncoder()
         self.traffic_light_encoder = TrafficLightEncoder()
         self.relation_encoder = FourierEmbedding(input_dim=3)
@@ -27,23 +29,24 @@ class Encoder(nn.Module):
     def forward(self, inputs):
         # agent encoding
         agents_history = inputs['agents_history']
-        T0 = agents_history.shape[-2]
+        T_history_and_cur = agents_history.shape[-2]
         agents_future = inputs['agents_future']
         agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[:, :, :, :5]), dim=-2)
         # x, y, yaw, vx, vy
         agents_interested = inputs['agents_interested']
-        agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T0)
+        agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur)
 
-        B, A, T, D = agents_local.shape
-        multi_task_mask, mask_type = get_random_mask(B, A, T, T0)
+        B, A_all, T_all, D_all = agents_local.shape
+        multi_task_mask, mask_type = get_random_mask(B, A_all, T_all, T_history_and_cur)
         agents_mask = torch.eq(agents_interested, 0)
-        multi_task_mask[agents_mask.unsqueeze(-1).repeat(1, 1, T).bool()] = True
+        multi_task_mask[agents_mask.unsqueeze(-1).repeat(1, 1, T_all).bool()] = True
 
+        # 在某些网络结构中（特别是 GRU 或 LSTM），连续的零输入可能会导致隐藏状态（hidden state）趋向于零，这被称为“状态衰减”
         agents_local[multi_task_mask] = 0.0
-        agents_local = agents_local.reshape(B * A, T, D)
-        mask_type = mask_type.reshape(B * A)
+        agents_local = agents_local.reshape(B * A_all, T_all, D_all)
+        mask_type = mask_type.reshape(B * A_all)
         encoded_agents = self.agent_encoder(agents_local, mask_type)
-        encoded_agents = encoded_agents.reshape(B, A, -1)
+        encoded_agents = encoded_agents.reshape(B, A_all, -1)
 
         # map and traffic light encoding
         map_polylines = inputs['polylines']
@@ -68,7 +71,7 @@ class Encoder(nn.Module):
         encoder_outputs['traffic_lights_mask'] = traffic_lights_mask
         encoder_outputs['task_mask'] = multi_task_mask
         encoder_outputs['relation_encodings'] = relations
-        encoder_outputs['T0'] = T0
+        encoder_outputs['T0'] = T_history_and_cur
 
         encodings = self.transformer_encoder(relations, encoded_agents, encoded_map_lanes, encoded_traffic_lights,
                                              agents_mask, maps_mask, traffic_lights_mask)
@@ -190,7 +193,7 @@ class Denoiser(nn.Module):
 class AgentEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.motion = nn.GRU(8, 256, 2, batch_first=True, dropout=0.2)  # Add dropout
+        self.motion = nn.GRU(5, 256, 2, batch_first=True, dropout=0.2)  # Add dropout
         self.type_embed = nn.Embedding(5, 256, padding_idx=0)
 
     def forward(self, history, type):
@@ -221,6 +224,28 @@ class AgentEncoderV2(nn.Module):
         output = output + type_embed
 
         return output
+
+
+class AgentEncoderTemporalAttn(nn.Module):
+    def __init__(self, time_dim=5, embed_dim=256, heads=4, max_len=100):
+        super().__init__()
+        self.embed = nn.Linear(time_dim, embed_dim)
+        self.pos = nn.Parameter(torch.randn(1, max_len, embed_dim))
+        self.mha = nn.MultiheadAttention(embed_dim, heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.type_embed = nn.Embedding(5, embed_dim, padding_idx=0)
+
+    def forward(self, history, type):
+        # history: [B*A, T, 5]
+        x = self.embed(history)  # [B*A, T, D]
+        T = x.shape[1]
+        pos = self.pos[:, :T, :]
+        x = x + pos
+        x2, _ = self.mha(x, x, x)  # self-attention over time
+        x = self.norm(x + x2)
+        out = torch.max(x, dim=1).values  # Aggregate by max-pooling over time
+        out = out + self.type_embed(type)
+        return out
 
 
 class MapEncoder(nn.Module):

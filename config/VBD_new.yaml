@@ -1,14 +1,17 @@
 model_name: VBD
 
 # Data Config
-train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
-val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
-anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
+# train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
+# val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
+# anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
+# log_dir: ./train_log
+train_data_path: /home/karim/VBD/data/train
+val_data_path: /home/karim/VBD/data/val
+anchor_path: vbd/data/cluster_64_center_dict.pkl
 log_dir: ./train_log
 
-
 # Wandb Config
-use_wandb: True
+use_wandb: False
 username: karim-sun
 project: vbd
 
@@ -22,7 +25,7 @@ action_len: 2
 encoder_layers: 6
 #prediction_type: sample
 prediction_type: sample
-encoder_version: v2 # v1: GRU, v2: MLP
+encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 
 # Diffusion Params
 diffusion_steps: 50
@@ -38,7 +41,7 @@ clamp_value: 5.0
 
 # Training Params
 seed: 21
-batch_size: 6
+batch_size: 1
 num_workers: 16
 #lr: 0.0002
 lr: 0.0002
