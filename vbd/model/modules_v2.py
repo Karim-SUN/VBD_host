@@ -169,8 +169,8 @@ class Denoiser(nn.Module):
         else:
             diffusion_step = diffusion_step[:, :self._agents_len]
 
-        T0 = encoder_inputs['T0']
-        current_states = encoder_inputs['agents'][:, :self._agents_len, T0 - 1]
+        T_history_and_cur = encoder_inputs['T0']
+        current_states = encoder_inputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
 
         encodings = encoder_inputs['encodings']
         relations = encoder_inputs['relation_encodings']
@@ -193,7 +193,10 @@ class Denoiser(nn.Module):
             encodings, relations, mask
         )
 
-        return decoder_output
+        # Decoder learns the offset
+        decoded_trajs = noised_trajs + decoder_output
+
+        return decoded_trajs
 
     def reset_agent_length(self, agents_len):
         self._agents_len = agents_len

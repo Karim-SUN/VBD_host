@@ -48,8 +48,13 @@ schedule_e: 1
 schedule_tau: 1
 
 action_mean: [0.0, 0.0]
-action_std: [1.0, 0.15]
+# action_std: [1.0, 0.15]
+action_std: [1.0, 1.0]
 clamp_value: 5.0
+
+normalize_anchors: True
+anchor_incre_min: [-0.1, -4]
+anchor_incre_max: [5, 2]
 
 # Training Params
 seed: 21

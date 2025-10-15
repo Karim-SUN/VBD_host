@@ -41,6 +41,8 @@ class VBD(pl.LightningModule):
         self._action_std = cfg['action_std']
         self._random_target = cfg.get('random_target', 0.1)
         self._task_probabilities = cfg.get('task_probabilities', None)
+        self.anchor_incre_min = cfg['anchor_incre_min']
+        self.anchor_incre_max = cfg['anchor_incre_max']
 
         self._train_encoder = cfg.get('train_encoder', True)
         self._train_denoiser = cfg.get('train_denoiser', True)
@@ -49,8 +51,8 @@ class VBD(pl.LightningModule):
         self._prediction_type = cfg.get('prediction_type', 'sample')
         self._schedule_type = cfg.get('schedule_type', 'cosine')
         self._replay_buffer = cfg.get('replay_buffer', False)
-        self._embeding_dim = cfg.get('embeding_dim',
-                                     2)  # By default, the embed is the noised trajectory so the dimension is 5
+        self._embeding_dim = cfg.get('embeding_dim', 2)  # By default, the embed is the noised trajectory so the dimension is 5
+        self._normalize_anchors = cfg.get('normalize_anchors', False)
 
         self.batch_size = cfg['batch_size']
         self.anchor = np.load('/home/karim/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
@@ -211,6 +213,8 @@ class VBD(pl.LightningModule):
         # denoised_actions = self.unnormalize_actions(denoised_actions_normalized)
         # denoised_trajs = roll_out(current_states, denoised_actions,
         #                           action_len=self.denoiser._action_len, dt=self._dt, global_frame=True)
+
+        # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
         denoised_trajs, denoised_trajs_origin = roll_out_new(
             current_states, denoised_traj_increments, global_frame=True)
 
@@ -396,6 +400,9 @@ class VBD(pl.LightningModule):
             # )
             # gt_actions_normalized = self.normalize_actions(gt_actions)
 
+            # sample noise
+            # noise = torch.randn(B*A, T, D).type_as(agents_future)
+
             diffusion_steps = torch.randint(
                 1, self.noise_scheduler.num_steps * 3 // 5, (B,),
                 device=agents_future.device
@@ -406,8 +413,6 @@ class VBD(pl.LightningModule):
             ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 2
             diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
 
-            # sample noise
-            # noise = torch.randn(B*A, T, D).type_as(agents_future)
             noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
             # noise the input
@@ -416,12 +421,16 @@ class VBD(pl.LightningModule):
             #     noise,
             #     diffusion_steps  # , .reshape(B*A),
             # )  # .reshape(B, A, T, D)
+
+            anchors_input = self.normalize_anchor_increments(anchors_input)
+
             noised_anchors_gt = self.noise_scheduler.add_noise(
                 anchors_input,  # .reshape(B*A, T, D),
                 noise,
                 diffusion_steps  # , .reshape(B*A),
             )
-            # noise = noise.reshape(B, A, T, D)
+
+            noised_anchors_gt = self.unnormalize_anchor_increments(noised_anchors_gt)
 
             # if self._replay_buffer:
             #     with torch.no_grad():
@@ -918,4 +927,44 @@ class VBD(pl.LightningModule):
              The unnormalized actions.
         """
         return actions * self.action_std + self.action_mean
+    
+    def normalize_anchor_increments(self, anchors: torch.Tensor):
+        """
+        Normalize the given anchor increments using the min and max values.
+
+        Args:
+            anchors : The anchor increments to be normalized. Shape [B, N, T, 2].
+        Returns:
+            The normalized anchor increments.
+        """
+        if not self._normalize_anchors:
+            return anchors
+        
+        # self.anchor_incre_min is [x_min, y_min], self.anchor_incre_max is [x_max, y_max]
+        min_val = torch.tensor(self.anchor_incre_min, device=anchors.device, dtype=anchors.dtype)
+        max_val = torch.tensor(self.anchor_incre_max, device=anchors.device, dtype=anchors.dtype)
+        
+        # Min-max normalization to [-1, 1]
+        # min_val and max_val are shape [2], they broadcast to [B, N, T, 2]
+        return 2 * (anchors - min_val) / (max_val - min_val) - 1
+        
+
+    def unnormalize_anchor_increments(self, anchors: torch.Tensor):
+        """
+        Unnormalize the given anchor increments using the stored anchor increment min and max values.
+
+        Args:
+            anchors: The normalized anchor increments to be unnormalized.
+
+        Returns:
+             The unnormalized anchor increments.
+        """
+        if not self._normalize_anchors:
+            return anchors
+        
+        min_val = torch.tensor(self.anchor_incre_min, device=anchors.device, dtype=anchors.dtype)
+        max_val = torch.tensor(self.anchor_incre_max, device=anchors.device, dtype=anchors.dtype)
+        
+        # Inverse of min-max normalization from [-1, 1]
+        return (anchors + 1) * (max_val - min_val) / 2 + min_val
 
