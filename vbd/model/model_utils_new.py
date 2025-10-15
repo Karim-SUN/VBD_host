@@ -474,7 +474,7 @@ def get_trajectory_type(traj: torch.Tensor):
     return traj_types
 
 
-def get_random_mask(B, A, T, T0, reactive_agents_num=4):
+def get_random_mask(B, A, T, T0, reactive_agents_num=4, task_probabilities=None):
     """
     Get a random mask.
 
@@ -483,26 +483,39 @@ def get_random_mask(B, A, T, T0, reactive_agents_num=4):
         A (int): Number of agents.
         T (int): Number of timesteps.
         T0 (int): Length of historical timesteps.
+        reactive_agents_num (int): Number of reactive agents for the corresponding task.
+        task_probabilities (dict): Probabilities for different tasks.
 
     Returns:
         torch.Tensor: Random mask.
         torch.Tensor: Random type.
     """
+    if task_probabilities is None:
+        task_probabilities = {
+            'prediction': 0.8,
+            'goal_conditioned': 0.08,
+            'agent_reactive': 0.08,
+            'reconstruction': 0.04
+        }
+
+    p_pred = task_probabilities['prediction']
+    p_goal = p_pred + task_probabilities['goal_conditioned']
+    p_react = p_goal + task_probabilities['agent_reactive']
 
     mask = torch.ones((B, A, T), dtype=torch.bool)
     type = torch.zeros((B, A), dtype=torch.long).to("cuda")
     for i in range(B):
         p = torch.rand(1).item()
-        if p < 0.7:
+        if p < p_pred:
             # Prediction
             mask[i, :, :T0] = 0
             type[i, :] = 1
-        elif p < 0.8:
+        elif p < p_goal:
             # Goal Conditioned
             mask[i, :, :T0] = 0
             mask[i, :, -1] = 0
             type[i, :] = 2
-        elif p < 0.9:
+        elif p < p_react:
             # Agent Reactive
             num_selected_agents = min(reactive_agents_num, A)
             selected_agents = torch.randperm(A)[:num_selected_agents]

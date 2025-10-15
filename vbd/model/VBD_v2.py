@@ -40,6 +40,7 @@ class VBD(pl.LightningModule):
         self._action_mean = cfg['action_mean']
         self._action_std = cfg['action_std']
         self._random_target = cfg.get('random_target', 0.1)
+        self._task_probabilities = cfg.get('task_probabilities', None)
 
         self._train_encoder = cfg.get('train_encoder', True)
         self._train_denoiser = cfg.get('train_denoiser', True)
@@ -59,7 +60,8 @@ class VBD(pl.LightningModule):
         self.encoder = Encoder(
             self._encoder_layers,
             version=self._encoder_version,
-            history_dropout=cfg.get('history_dropout', 0.2)
+            history_dropout=cfg.get('history_dropout', 0.2),
+            task_probabilities=self._task_probabilities
         )
 
         self.denoiser = Denoiser(
@@ -280,19 +282,19 @@ class VBD(pl.LightningModule):
             debug_outputs: Dictionary containing debug outputs.
         """
         # data inputs
-        agents_future = batch['agents_future'][:, :self._agents_len]
+        agents_future = batch['agents_future']
         B, A_all, T_future, D_all = agents_future.shape
         T_future_steps = T_future // self._action_len
         D_predict = 2
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, A_all, -1, -1, -1)
+        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
 
         # TODO: Investigate why this to NAN
         # agents_future_valid = batch['agents_future_valid'][:, :self._agents_len]
         agents_future_valid = torch.ne(agents_future.sum(-1), 0)
         agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
             agents_future_valid) & agents_future_valid
-        agents_interested = batch['agents_interested'][:, :self._agents_len]
-        anchors = batch['anchors'][:, :self._agents_len]
+        agents_interested = batch['agents_interested']
+        anchors = batch['anchors']
 
         # # get actions from trajectory
         # gt_actions, gt_actions_valid = inverse_kinematics(
@@ -304,6 +306,14 @@ class VBD(pl.LightningModule):
         #
         # gt_actions_normalized = self.normalize_actions(gt_actions)
         # B, A, T, D = gt_actions_normalized.shape
+        
+        # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
+        agents_history = batch['agents_history']
+        agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[..., :5]), dim=-2)
+        batch['agents_features'] = agents_features
+        T_history_and_cur = agents_history.shape[-2]
+        batch['T_history_and_cur'] = T_history_and_cur
+        batch['T_history_and_cur'] = agents_history.shape[-2]
 
         log_dict = {}
         debug_outputs = {}
@@ -313,6 +323,9 @@ class VBD(pl.LightningModule):
 
         ############## Run Encoder ##############
         encoder_outputs = self.encoder(batch)
+        agents_future = agents_future[:, :self._agents_len]
+        agents_future_valid = agents_future_valid[:, :self._agents_len]
+        agents_interested = agents_interested[:, :self._agents_len]
 
         ############### Behavior Prior Prediction #################
         if self._train_predictor:
@@ -364,7 +377,7 @@ class VBD(pl.LightningModule):
             # get predicted anchor
             assert goal_scores != None, 'No valid goal predictions yet.'
             B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
-            A_idx = torch.arange(A_all).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
+            A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
             goal_index = goal_scores.argmax(-1)
 
             batch_index_mask = torch.rand(B) < self._random_target
@@ -386,16 +399,16 @@ class VBD(pl.LightningModule):
             diffusion_steps = torch.randint(
                 1, self.noise_scheduler.num_steps * 3 // 5, (B,),
                 device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, A_all).view(B, A_all, 1, 1)
+            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1)
             random_diffusion_steps = torch.randint(
                 1, self.noise_scheduler.num_steps // 2, (B,),
                 device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, A_all).view(B, A_all, 1, 1) + self.noise_scheduler.num_steps // 2
+            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 2
             diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
 
             # sample noise
             # noise = torch.randn(B*A, T, D).type_as(agents_future)
-            noise = torch.randn(B, A_all, T_future_steps, D_predict).type_as(agents_future)
+            noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
             # noise the input
             # noised_action_normalized = self.noise_scheduler.add_noise(
@@ -430,7 +443,7 @@ class VBD(pl.LightningModule):
             # denoise_outputs = self.forward_denoiser(encoder_outputs, noised_action_normalized,
             #                                         diffusion_steps.view(B, A))
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_anchors_gt,
-                                                    diffusion_steps.view(B, A_all))
+                                                    diffusion_steps.view(B, self._agents_len))
 
             debug_outputs.update(denoise_outputs)
             debug_outputs['noise'] = noise

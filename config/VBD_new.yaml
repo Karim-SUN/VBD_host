@@ -19,13 +19,20 @@ project: vbd
 init_from: null
 
 # Model Config
-agents_len: 32
+agents_len: 16
 future_len: 80
 action_len: 2
 encoder_layers: 6
 
 # Encoder
 history_dropout: 0.4
+
+# Task Probabilities for get_random_mask
+task_probabilities:
+  prediction: 0.8
+  goal_conditioned: 0.08
+  agent_reactive: 0.08
+  reconstruction: 0.04
 
 # Predictor
 #prediction_type: sample

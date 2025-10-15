@@ -12,7 +12,7 @@ from .model_utils_new import get_random_mask
 
 
 class Encoder(nn.Module):
-    def __init__(self, layers=6, version='v1', history_dropout=0.2):
+    def __init__(self, layers=6, version='v1', history_dropout=0.2, task_probabilities=None):
         super().__init__()
         self._version = version
         if self._version == 'v1':
@@ -26,18 +26,16 @@ class Encoder(nn.Module):
         self.relation_encoder = FourierEmbedding(input_dim=3)
         self.transformer_encoder = TransformerEncoder(layers=layers)
         self.history_dropout = history_dropout
+        self.task_probabilities = task_probabilities
 
     def forward(self, inputs):
         # agent encoding
-        agents_history = inputs['agents_history']
-        T_history_and_cur = agents_history.shape[-2]
-        agents_future = inputs['agents_future']
-        agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[:, :, :, :5]), dim=-2)
+        agents_features = inputs['agents_features']
+        B, A_all, T_all, D_all = agents_features.shape
+        T_history_and_cur = inputs['T_history_and_cur']
         # x, y, yaw, vx, vy
-        agents_interested = inputs['agents_interested']
+        agents_interested = inputs['agents_interested'][:, :A_all]
         agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur)
-
-        B, A_all, T_all, D_all = agents_local.shape
 
         # --- State Dropout: 按时间戳随机丢弃历史状态 ---
         if self.training and self.history_dropout > 0:
@@ -49,7 +47,7 @@ class Encoder(nn.Module):
                 # 应用遮罩到历史轨迹部分
                 agents_local[:, :, :history_len, :] *= time_mask
 
-        multi_task_mask, mask_type = get_random_mask(B, A_all, T_all, T_history_and_cur)
+        multi_task_mask, mask_type = get_random_mask(B, A_all, T_all, T_history_and_cur, task_probabilities=self.task_probabilities)
         agents_mask = torch.eq(agents_interested, 0)
         multi_task_mask[agents_mask.unsqueeze(-1).repeat(1, 1, T_all).bool()] = True
 
