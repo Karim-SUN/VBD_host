@@ -404,13 +404,15 @@ class VBD(pl.LightningModule):
             # noise = torch.randn(B*A, T, D).type_as(agents_future)
 
             diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps * 3 // 5, (B,),
+                1, self.noise_scheduler.num_steps * 1 // 20, (B,),
                 device=agents_future.device
             ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1)
+
             random_diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps // 2, (B,),
+                1, self.noise_scheduler.num_steps * 3 // 40, (B,),
                 device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 2
+            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
+
             diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
 
             noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
@@ -429,6 +431,7 @@ class VBD(pl.LightningModule):
                 noise,
                 diffusion_steps  # , .reshape(B*A),
             )
+            noised_anchors_gt = torch.clamp(noised_anchors_gt, min=-1, max=1)
 
             noised_anchors_gt = self.unnormalize_anchor_increments(noised_anchors_gt)
 

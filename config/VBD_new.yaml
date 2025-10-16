@@ -40,7 +40,7 @@ prediction_type: sample
 encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 
 # Diffusion Params
-diffusion_steps: 50
+diffusion_steps: 1000
 #schedule_type: cosine  $$$
 schedule_type: log
 schedule_s: 0
@@ -53,8 +53,8 @@ action_std: [1.0, 1.0]
 clamp_value: 5.0
 
 normalize_anchors: True
-anchor_incre_min: [-0.1, -4]
-anchor_incre_max: [5, 2]
+anchor_incre_min: [-0.2, -2]
+anchor_incre_max: [7, 2]
 
 # Training Params
 seed: 21
