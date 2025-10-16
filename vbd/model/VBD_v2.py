@@ -5,12 +5,12 @@ from .modules_v2 import Encoder, Denoiser, GoalPredictor
 from .utils import DDPM_Sampler
 from .model_utils_new import (inverse_kinematics, roll_out, batch_transform_trajs_to_global_frame,
                               get_trajectory_type, interpolate_anchors, roll_out_new)
-from torch.nn.functional import smooth_l1_loss, cross_entropy
+from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax
 
 
 class VBD(pl.LightningModule):
     """
-    Versertile Behavior Diffusion model.
+    Versatile Behavior Diffusion model.
     """
 
     def __init__(
@@ -382,14 +382,27 @@ class VBD(pl.LightningModule):
             assert goal_scores != None, 'No valid goal predictions yet.'
             B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
             A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
-            goal_index = goal_scores.argmax(-1)
+            # Use Gumbel-Softmax for differentiable sampling of anchors
+            goal_one_hot = gumbel_softmax(goal_scores, tau=1, hard=True, dim=-1)
 
-            batch_index_mask = torch.rand(B) < self._random_target
-            random_index = torch.randint(0, 20, goal_index.shape).to(goal_index.device)
-            goal_index[batch_index_mask] = random_index[batch_index_mask]
+            # Introduce random exploration
+            batch_index_mask = torch.rand(B, device=goal_scores.device) < self._random_target
+            if batch_index_mask.any():
+                num_anchors = goal_scores.shape[-1]
+                random_indices = torch.randint(0, num_anchors, (B, self._agents_len), device=goal_scores.device)
+                random_one_hot = torch.nn.functional.one_hot(random_indices, num_classes=num_anchors).float()
+                
+                # Apply random selection only for masked batches
+                # Unsqueeze batch_index_mask to match dimensions for broadcasting
+                goal_one_hot = torch.where(batch_index_mask.unsqueeze(-1).unsqueeze(-1), random_one_hot, goal_one_hot)
 
-            target_anchors_gt = anchors[B_idx, A_idx, goal_index, :, :]  # 索引数据
-            anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # 计算相邻锚点的差值
+            # Select anchors using the one-hot tensor
+            # Reshape one-hot tensor to [B, A, num_anchors, 1, 1] for broadcasting
+            selected_anchors_one_hot = goal_one_hot.unsqueeze(-1).unsqueeze(-1)
+            # Multiply and sum to select the target anchors
+            target_anchors_gt = (anchors * selected_anchors_one_hot).sum(dim=2)
+
+            anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # Calculate increments from anchors
 
             # get actions from anchors
             # gt_actions, gt_actions_valid = inverse_kinematics(
