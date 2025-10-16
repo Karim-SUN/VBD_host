@@ -78,25 +78,38 @@ def batch_transform_trajs_to_global_frame(trajs, current_states):
     Batch transform trajectories to the global frame of reference.
 
     Args:
-        trajs (torch.Tensor): Trajectories tensor of shape [B, N, x, 2 or 3].
-        current_states (torch.Tensor): Current states tensor of shape [B, N, 5].
+        trajs (torch.Tensor): Trajectories tensor of shape [B, N, ..., 2 or 3].
+        current_states (torch.Tensor): Current states tensor of shape [B, N, ..., 3].
+                                      The dimensions after B, N must be broadcastable to trajs.
 
     Returns:
-        torch.Tensor: Transformed trajectories in the global frame. [B, N, x, 3]
+        torch.Tensor: Transformed trajectories in the global frame. [B, N, ..., 3]
 
     """
-    x, y, theta = current_states[:, :, 0], current_states[:, :, 1], current_states[:, :, 2]
-    g_x = trajs[..., 0] * torch.cos(theta[:, :, None]) - trajs[..., 1] * torch.sin(theta[:, :, None])
-    g_y = trajs[..., 0] * torch.sin(theta[:, :, None]) + trajs[..., 1] * torch.cos(theta[:, :, None])
-    x = g_x + x[:, :, None]
-    y = g_y + y[:, :, None]
+    x, y, theta = current_states[..., 0], current_states[..., 1], current_states[..., 2]
+
+    # Ensure theta has the correct number of dimensions for broadcasting
+    # Add dimensions to theta until it matches the number of dimensions of trajs
+    while len(theta.shape) < len(trajs.shape) -1:
+        theta = theta.unsqueeze(-1)
+
+    g_x = trajs[..., 0] * torch.cos(theta) - trajs[..., 1] * torch.sin(theta)
+    g_y = trajs[..., 0] * torch.sin(theta) + trajs[..., 1] * torch.cos(theta)
+    
+    # Add dimensions to x and y for broadcasting
+    while len(x.shape) < len(g_x.shape):
+        x = x.unsqueeze(-1)
+        y = y.unsqueeze(-1)
+
+    x = g_x + x
+    y = g_y + y
 
     if trajs.shape[-1] == 2:
         trajs = torch.stack([x, y], dim=-1)
     else:
-        theta = trajs[..., 2] + theta[:, :, None]
-        theta = wrap_angle(theta)
-        trajs = torch.stack([x, y, theta], dim=-1)
+        g_theta = trajs[..., 2] + theta
+        g_theta = wrap_angle(g_theta)
+        trajs = torch.stack([x, y, g_theta], dim=-1)
 
     return trajs
 

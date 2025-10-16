@@ -343,7 +343,7 @@ class VBD(pl.LightningModule):
 
             goal_loss_mean, score_loss_mean = self.goal_loss(
                 goal_trajs, goal_scores, agents_future,
-                agents_future_valid, anchors[:, :, :, -1, :],
+                agents_future_valid, anchors,
                 agents_interested,
             )
             # goal_loss_mean, type_loss_mean = self.goal_loss_new(
@@ -696,58 +696,66 @@ class VBD(pl.LightningModule):
             agents_interested
     ):
         """
-        Calculates the loss for trajectory prediction.
+        Calculates the loss for trajectory prediction using an efficient, vectorized
+        implementation of Plackett-Luce ranking loss.
 
         Args:
-            trajs (torch.Tensor): Tensor of shape [B*A, Q, T, 3] representing predicted trajectories.
-            scores (torch.Tensor): Tensor of shape [B*A, Q] representing predicted scores.
-            agents_future (torch.Tensor): Tensor of shape [B, A, T, 3] representing future agent states.
-            agents_future_valid (torch.Tensor): Tensor of shape [B, A, T] representing validity of future agent states.
-            anchors (torch.Tensor): Tensor of shape [B, A, Q, 2] representing anchor points.
-            agents_interested (torch.Tensor): Tensor of shape [B, A] representing interest in agents.
+            trajs (torch.Tensor): Predicted trajectories from GoalPredictor, shape [B, A, Q, T, 3].
+            scores (torch.Tensor): Predicted scores (logits) for anchors, shape [B, A, Q].
+            agents_future (torch.Tensor): Ground truth future agent states, shape [B, A, T, D].
+            agents_future_valid (torch.Tensor): Validity of future states, shape [B, A, T].
+            anchors (torch.Tensor): Anchor trajectories in local frame, shape [B, A, Q, T+1, 2].
+            agents_interested (torch.Tensor): Interest in agents, shape [B, A].
 
         Returns:
-            traj_loss_mean (torch.Tensor): Mean trajectory loss.
-            score_loss_mean (torch.Tensor): Mean score loss.
+            traj_loss_mean (torch.Tensor): Mean regression loss for the best predicted trajectory.
+            score_loss_mean (torch.Tensor): Mean ranking loss based on Plackett-Luce model.
         """
-        # Convert Anchor to Global Frame
+        num_batch, num_agents, num_query, _, _ = trajs.shape
+        num_timesteps_future = agents_future.shape[2]
+
+        # --- 1. Get Ground Truth Ranking based on Anchors ---
         current_states = agents_future[:, :, 0, :3]
-        anchors_global = batch_transform_trajs_to_global_frame(anchors, current_states)
-        num_batch, num_agents, num_query, _ = anchors_global.shape
+        global_anchors = batch_transform_trajs_to_global_frame(anchors, current_states)
 
-        # Get Mask
-        traj_mask = agents_future_valid[..., 1:] * (agents_interested[..., None] > 0)  # [B, A, T]
+        traj_mask = agents_future_valid[..., 1:] * (agents_interested[..., None] > 0)
+        trajs_gt = agents_future[:, :, 1:, :2].flatten(0, 1)
+        global_anchors_flat = global_anchors[:, :, :, 1:, :2].flatten(0, 1)
+        scores_flat = scores.flatten(0, 1)
+        flat_traj_mask = traj_mask.flatten(0, 1)
+        flat_agents_interested = agents_interested.flatten(0, 1) > 0
 
-        # Flatten batch and agents
-        goal_gt = agents_future[:, :, -1:, :2].flatten(0, 1)  # [B*A, 1, 2]
-        trajs_gt = agents_future[:, :, 1:, :3].flatten(0, 1)  # [B*A, T, 3]
-        trajs = trajs.flatten(0, 1)[..., :3]  # [B*A, Q, T, 3]
-        anchors_global = anchors_global.flatten(0, 1)  # [B*A, Q, 2]
+        dist = torch.norm(global_anchors_flat - trajs_gt.unsqueeze(1), dim=-1)
+        dist = dist * flat_traj_mask.unsqueeze(1)
+        ade = dist.sum(-1) / torch.clamp(flat_traj_mask.sum(-1, keepdim=True), min=1.0)
+        gt_ranking = torch.argsort(ade, dim=-1)
 
-        # Find the closest anchor
-        idx_anchor = torch.argmin(torch.norm(anchors_global - goal_gt, dim=-1), dim=-1)  # [B*A,]
+        # --- 2. Efficiently Calculate Plackett-Luce ranking loss ---
+        # Sort the scores according to the ground truth ranking
+        ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
 
-        # For agents that do not have valid end point, use the minADE
-        dist = torch.norm(trajs[:, :, :, :2] - trajs_gt[:, None, :, :2], dim=-1)  # [B*A, Q, T]
-        dist = dist * traj_mask.flatten(0, 1)[:, None, :]  # [B*A, Q, T]
-        idx = torch.argmin(dist.mean(-1), dim=-1)  # [B*A,]
+        # Compute log denominators for the Plackett-Luce likelihood
+        log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
 
-        # Select trajectory
-        idx = torch.where(agents_future_valid[..., -1].flatten(0, 1), idx_anchor, idx)
-        trajs_select = trajs[torch.arange(num_batch * num_agents), idx]  # [B*A, T, 3]
+        # The log probability of the PL distribution is the sum of the log probabilities
+        # of picking the correct item at each step: log(p_k) = r_k - log(sum(exp(r_j)))
+        pl_log_probs = ranked_scores - log_denominators
+        
+        # The total loss is the negative sum of these log probabilities.
+        score_loss = -pl_log_probs.sum(dim=-1)
 
-        # Calculate the trajectory loss
-        traj_loss = smooth_l1_loss(trajs_select, trajs_gt, reduction='none').sum(-1)  # [B*A, T]
-        traj_loss = traj_loss * traj_mask.flatten(0, 1)  # [B*A, T]
+        # Average the loss over valid agents
+        score_loss = score_loss * flat_agents_interested
+        score_loss_mean = score_loss.sum() / torch.clamp(flat_agents_interested.sum(), min=1.0)
 
-        # Calculate the score loss
-        scores = scores.flatten(0, 1)  # [B*A, Q]
-        score_loss = cross_entropy(scores, idx, reduction='none')  # [B*A]
-        score_loss = score_loss * (agents_interested.flatten(0, 1) > 0)  # [B*A]
-
-        # Calculate the mean loss
-        traj_loss_mean = traj_loss.sum() / traj_mask.sum()
-        score_loss_mean = score_loss.sum() / (agents_interested > 0).sum()
+        # --- 3. Calculate regression loss for the best *predicted* trajectory ---
+        trajs_pred_flat = trajs.flatten(0, 1)[:, :, :, :2]
+        best_pred_idx = torch.argmax(scores_flat, dim=-1)
+        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
+        
+        traj_loss = smooth_l1_loss(trajs_select[:, :num_timesteps_future-1], trajs_gt, reduction='none').sum(-1)
+        traj_loss = traj_loss * flat_traj_mask
+        traj_loss_mean = traj_loss.sum() / torch.clamp(flat_traj_mask.sum(), min=1.0)
 
         return traj_loss_mean, score_loss_mean
 

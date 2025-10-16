@@ -22,7 +22,7 @@ class WaymaxDataset(Dataset):
     def __init__(
         self,
         data_dir,
-        anchor_path = "data/cluster_64_center_dict.pkl",
+        anchor_path = "/home/karim/VBD_host/vbd/data/cluster_64_center_dict.pkl",
     ):
         self.data_list = glob.glob(data_dir+'/*') if data_dir is not None else []
         self.anchors = pickle.load(open(anchor_path, "rb"))
