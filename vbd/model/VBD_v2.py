@@ -199,12 +199,12 @@ class VBD(pl.LightningModule):
         # noised_actions = self.unnormalize_actions(noised_actions_normalized)
         # denoiser_output = self.denoiser(encoder_outputs, noised_actions, diffusion_step)
         denoiser_output = self.denoiser(encoder_outputs, noised_anchors_gt, diffusion_step, rollout=False)
-        denoised_traj_increments = self.noise_scheduler.q_x0(
-            denoiser_output,
-            diffusion_step,
-            noised_anchors_gt,
-            prediction_type=self._prediction_type
-        )
+        # denoised_traj_increments = self.noise_scheduler.q_x0(
+        #     denoiser_output,
+        #     diffusion_step,
+        #     noised_anchors_gt,
+        #     prediction_type=self._prediction_type
+        # )
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
         current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
@@ -217,7 +217,7 @@ class VBD(pl.LightningModule):
 
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
         denoised_trajs, denoised_trajs_origin = roll_out_new(
-            current_states, denoised_traj_increments, global_frame=True)
+            current_states, denoiser_output, global_frame=True)
 
 
         # return {
@@ -484,10 +484,10 @@ class VBD(pl.LightningModule):
                 #     agents_interested,
                 # )
                 # denoise_loss = state_loss_mean + yaw_loss_mean
-                denoise_loss = self.traj_loss(
+                traj_loss = self.traj_loss(
                     denoised_trajs, agents_future, agents_future_valid, agents_interested
                 )
-                total_loss += denoise_loss
+                total_loss += traj_loss
 
                 # Predict the noise
                 # _, diffusion_loss = self.noise_scheduler.get_noise(
@@ -496,12 +496,12 @@ class VBD(pl.LightningModule):
                 #     timesteps=diffusion_steps,
                 #     gt_noise=noise,
                 # )
-                _, diffusion_loss = self.noise_scheduler.get_noise(
-                    x_0=denoise_outputs['denoised_trajs_origin'][..., :D_predict],
-                    x_t=noised_anchors_gt,
-                    timesteps=diffusion_steps,
-                    gt_noise=noise,
-                )
+                # _, diffusion_loss = self.noise_scheduler.get_noise(
+                #     x_0=denoise_outputs['denoised_trajs_origin'][..., :D_predict],
+                #     x_t=noised_anchors_gt,
+                #     timesteps=diffusion_steps,
+                #     gt_noise=noise,
+                # )
 
                 # log_dict.update({
                 #     prefix + 'state_loss': state_loss_mean.item(),
@@ -509,8 +509,8 @@ class VBD(pl.LightningModule):
                 #     prefix + 'diffusion_loss': diffusion_loss.item()
                 # })
                 log_dict.update({
-                    prefix + 'state_loss': denoise_loss.item(),
-                    prefix + 'diffusion_loss': diffusion_loss.item()
+                    prefix + 'traj_loss': traj_loss.item(),
+                    # prefix + 'diffusion_loss': diffusion_loss.item()
                 })
 
             elif self._prediction_type == 'error':
