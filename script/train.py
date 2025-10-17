@@ -131,7 +131,7 @@ def train(cfg):
         gradient_clip_val=1.0,  
         gradient_clip_algorithm="norm",
         num_sanity_val_steps=0,
-        precision="bf16-mixed",
+        precision=cfg.get("precision", "32-true"),
         log_every_n_steps=100,
         callbacks=[
             ModelCheckpoint(
@@ -183,6 +183,7 @@ def build_parser():
     parser.add_argument("-eV", "--encoder_version", type=str, default=None)
     parser.add_argument("-pred", "--with_predictor", type=bool, default=None)
     parser.add_argument("-type", "--prediction_type", type=str, default=None)
+    parser.add_argument("-prec", "--precision", type=str, default=None, help="Training precision, e.g., '16-mixed', 'bf16-mixed', '32-true'")
     
     return parser
     
@@ -204,4 +205,4 @@ if __name__ == "__main__":
     cfg = load_cfg(args)
     
     train(cfg)
-    
+

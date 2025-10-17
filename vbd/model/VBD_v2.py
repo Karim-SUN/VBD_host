@@ -43,6 +43,7 @@ class VBD(pl.LightningModule):
         self._task_probabilities = cfg.get('task_probabilities', None)
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
+        self._gumbel_tau = cfg.get('gumbel_tau', 1.0)
 
         self._train_encoder = cfg.get('train_encoder', True)
         self._train_denoiser = cfg.get('train_denoiser', True)
@@ -383,7 +384,7 @@ class VBD(pl.LightningModule):
             B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
             A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
             # Use Gumbel-Softmax for differentiable sampling of anchors
-            goal_one_hot = gumbel_softmax(goal_scores, tau=1, hard=True, dim=-1)
+            goal_one_hot = gumbel_softmax(goal_scores, tau=self._gumbel_tau, hard=True, dim=-1)
 
             # Introduce random exploration
             batch_index_mask = torch.rand(B, device=goal_scores.device) < self._random_target
