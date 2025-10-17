@@ -1,6 +1,6 @@
 config/VBD_new.yaml
 train_log/
-vbd/model/__pycache__
-vbd/data/__pycache__
-vbd/sim_agent/__pycache__
-vbd/waymax_visualization/__pycache__
+vbd/model/__pycache__/
+vbd/data/__pycache__/
+vbd/sim_agent/__pycache__/
+vbd/waymax_visualization/__pycache__/

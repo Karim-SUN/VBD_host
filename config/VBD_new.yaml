@@ -7,7 +7,7 @@ anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
 log_dir: ./train_log
 
 # Wandb Config
-use_wandb: False
+use_wandb: True
 username: karim-sun
 project: vbd
 
