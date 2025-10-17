@@ -56,7 +56,7 @@ class VBD(pl.LightningModule):
         self._normalize_anchors = cfg.get('normalize_anchors', False)
 
         self.batch_size = cfg['batch_size']
-        self.anchor = np.load('/home/karim/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
+        self.anchor = np.load('/home/huang/Mount_Disk/shy/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
         self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
         self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
 

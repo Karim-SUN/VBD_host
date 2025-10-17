@@ -1,13 +1,9 @@
 model_name: VBD
 
 # Data Config
-# train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
-# val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
-# anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
-# log_dir: ./train_log
-train_data_path: /home/karim/VBD/data/train
-val_data_path: /home/karim/VBD/data/val
-anchor_path: vbd/data/cluster_64_center_dict.pkl
+train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
+val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
+anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
 log_dir: ./train_log
 
 # Wandb Config
@@ -59,7 +55,7 @@ anchor_incre_max: [7, 2]
 
 # Training Params
 seed: 21
-batch_size: 1
+batch_size: 8
 num_workers: 16
 #lr: 0.0002
 lr: 0.0002
