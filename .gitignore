@@ -1,6 +1,24 @@
+# Local configurations
 config/VBD_new.yaml
+
+# Logs and training artifacts
 train_log/
-vbd/model/__pycache__
-vbd/data/__pycache__
-vbd/sim_agent/__pycache__
-vbd/waymax_visualization/__pycache__
+*.log
+logs/
+
+# Python cache and compiled files
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
