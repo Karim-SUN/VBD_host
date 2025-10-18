@@ -484,7 +484,7 @@ class VBD(pl.LightningModule):
                 traj_loss = self.traj_loss(
                     denoised_trajs, agents_future, agents_future_valid, agents_interested
                 )
-                total_loss += self.trajr_loss_weight * (self.traj_loss_weight * traj_loss)
+                total_loss += self.traj_loss_weight * (self.traj_loss_weight * traj_loss)
 
                 # Predict the noise
                 # _, diffusion_loss = self.noise_scheduler.get_noise(
