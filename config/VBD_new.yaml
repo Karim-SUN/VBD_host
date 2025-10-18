@@ -58,14 +58,19 @@ seed: 21
 batch_size: 8
 num_workers: 16
 #lr: 0.0002
-lr: 0.0002
+lr: 0.0005
 weight_decay: 0.01
 epochs: 12
-lr_warmup_step: 1000
-lr_step_freq: 1000
-#lr_step_gamma: 0.98
-lr_step_gamma: 0.96
+lr_warmup_step: 2000
+lr_total_steps: 42000 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
+lr_end_factor: 0.01 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
+goal_loss_weight: 0.1
+score_loss_weight: 0.8
+predictor_loss_weight: 1.0
+traj_loss_weight: 0.4
+denoise_loss_weight: 0.5
+denoiser_loss_weight: 1.0
 
 train_encoder: True
 train_denoiser: True

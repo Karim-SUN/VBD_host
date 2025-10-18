@@ -6,6 +6,7 @@ from .utils import DDPM_Sampler
 from .model_utils_new import (inverse_kinematics, roll_out, batch_transform_trajs_to_global_frame,
                               get_trajectory_type, interpolate_anchors, roll_out_new)
 from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax
+import math
 
 
 class VBD(pl.LightningModule):
@@ -44,6 +45,13 @@ class VBD(pl.LightningModule):
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
         self._gumbel_tau = cfg.get('gumbel_tau', 1.0)
+
+        self.goal_loss_weight = cfg.get('goal_loss_weight', 1.0)
+        self.score_loss_weight = cfg.get('score_loss_weight', 1.0)
+        self.predictor_loss_weight = cfg.get('predictor_loss_weight', 1.0)
+        self.traj_loss_weight = cfg.get('traj_loss_weight', 1.0)
+        self.denoise_loss_weight = cfg.get('denoise_loss_weight', 1.0)
+        self.denoiser_loss_weight = cfg.get('denoiser_loss_weight', 1.0)
 
         self._train_encoder = cfg.get('train_encoder', True)
         self._train_denoiser = cfg.get('train_denoiser', True)
@@ -125,34 +133,23 @@ class VBD(pl.LightningModule):
             weight_decay=self.cfg['weight_decay']
         )
 
-        lr_warmpup_step = self.cfg['lr_warmup_step']
-        lr_step_freq = self.cfg['lr_step_freq']
-        lr_step_gamma = self.cfg['lr_step_gamma']
+        warmup_steps = self.cfg['lr_warmup_step']
+        total_steps = self.cfg['lr_total_steps']
+        end_factor = self.cfg.get('lr_end_factor', 0.01)
 
-        def lr_update(step, warmup_step, step_size, gamma):
-            if step < warmup_step:
-                # warm up lr
-                lr_scale = 1 - (warmup_step - step) / warmup_step * 0.95
-            else:
-                n = (step - warmup_step) // step_size
-                lr_scale = gamma ** n
+        def lr_lambda(current_step: int):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            
+            # Cosine annealing schedule
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            
+            # Mix with linear decay to the end_factor
+            return (1.0 - end_factor) * cosine_decay + end_factor
 
-            if lr_scale < 1e-2:
-                lr_scale = 1e-2
-            elif lr_scale > 1:
-                lr_scale = 1
-
-            return lr_scale
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-            optimizer,
-            lr_lambda=lambda step: lr_update(
-                step,
-                lr_warmpup_step,
-                lr_step_freq,
-                lr_step_gamma,
-            )
-        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
@@ -199,12 +196,12 @@ class VBD(pl.LightningModule):
         # noised_actions = self.unnormalize_actions(noised_actions_normalized)
         # denoiser_output = self.denoiser(encoder_outputs, noised_actions, diffusion_step)
         denoiser_output = self.denoiser(encoder_outputs, noised_anchors_gt, diffusion_step, rollout=False)
-        # denoised_traj_increments = self.noise_scheduler.q_x0(
-        #     denoiser_output,
-        #     diffusion_step,
-        #     noised_anchors_gt,
-        #     prediction_type=self._prediction_type
-        # )
+        # # denoised_traj_increments = self.noise_scheduler.q_x0(
+        # #     denoiser_output,
+        # #     diffusion_step,
+        # #     noised_anchors_gt,
+        # #     prediction_type=self._prediction_type
+        # # )
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
         current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
@@ -352,9 +349,9 @@ class VBD(pl.LightningModule):
             #     agents_future_valid, agents_interested
             # )
 
-            pred_loss = goal_loss_mean + 0.5 * score_loss_mean
+            pred_loss = self.goal_loss_weight * goal_loss_mean + self.score_loss_weight * score_loss_mean
             # pred_loss = goal_loss_mean + 0.05 * type_loss_mean
-            total_loss += 1.0 * pred_loss
+            total_loss += self.predictor_loss_weight * pred_loss
 
             pred_ade, pred_fde = self.calculate_metrics_predict(
                 goal_trajs, agents_future, agents_future_valid, agents_interested, 8
@@ -487,7 +484,7 @@ class VBD(pl.LightningModule):
                 traj_loss = self.traj_loss(
                     denoised_trajs, agents_future, agents_future_valid, agents_interested
                 )
-                total_loss += traj_loss
+                total_loss += self.trajr_loss_weight * (self.traj_loss_weight * traj_loss)
 
                 # Predict the noise
                 # _, diffusion_loss = self.noise_scheduler.get_noise(
@@ -518,7 +515,7 @@ class VBD(pl.LightningModule):
                 denoise_loss = torch.nn.functional.mse_loss(
                     denoiser_output, noise, reduction='mean'
                 )
-                total_loss += denoise_loss
+                total_loss += self.denoiser_loss_weight * (self.denoise_loss_weight * denoise_loss)
                 log_dict.update({
                     prefix + 'diffusion_loss': denoise_loss.item(),
                 })
@@ -531,7 +528,7 @@ class VBD(pl.LightningModule):
                 denoise_loss = self.traj_loss(
                     denoised_trajs, agents_future, agents_future_valid, agents_interested
                 )
-                total_loss += denoise_loss
+                total_loss += (self.denoiser_loss_weight * self.denoise_loss_weight * denoise_loss)
                 # log_dict.update({
                 #     prefix + 'action_loss': denoise_loss.item(),
                 # })
