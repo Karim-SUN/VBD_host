@@ -14,6 +14,7 @@ log_dir: ./train_log
 use_wandb: False
 username: karim-sun
 project: vbd
+wandb_dir: ./wandb_logs # 自定义wandb日志的根目录
 
 # Checkpoint Config
 init_from: null
