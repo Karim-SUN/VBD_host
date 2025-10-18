@@ -108,12 +108,14 @@ def train(cfg):
     
     use_wandb = cfg.get("use_wandb", True)
     if use_wandb:
+        # 如果配置了 wandb_dir，则使用它，否则默认使用 output_path
+        wandb_save_dir = cfg.get("wandb_dir", output_path)
         logger = WandbLogger(
             name=model_name,
             project=cfg.get("project"),
             entity=cfg.get("username"),
             log_model=False,
-            dir=output_path,
+            dir=wandb_save_dir,
         )
     else:
         logger = CSVLogger(output_path, name="VBD", version=1, flush_logs_every_n_steps=100)
