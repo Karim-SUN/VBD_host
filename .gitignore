@@ -3,6 +3,7 @@ config/VBD_new.yaml
 
 # Logs and training artifacts
 train_log/
+wandb/
 *.log
 logs/
 
