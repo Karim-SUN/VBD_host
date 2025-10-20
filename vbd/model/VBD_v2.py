@@ -44,7 +44,10 @@ class VBD(pl.LightningModule):
         self._task_probabilities = cfg.get('task_probabilities', None)
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
-        self._gumbel_tau = cfg.get('gumbel_tau', 1.0)
+        self.use_gumbel_anneal = cfg.get('use_gumbel_anneal', False)
+        self._gumbel_tau_start = cfg.get('gumbel_tau_start', 1.0)
+        self._gumbel_tau_end = cfg.get('gumbel_tau_end', 0.1)
+        self._gumbel_anneal_steps = cfg.get('gumbel_anneal_steps', 10000)
 
         self.goal_loss_weight = cfg.get('goal_loss_weight', 1.0)
         self.score_loss_weight = cfg.get('score_loss_weight', 1.0)
@@ -566,6 +569,18 @@ class VBD(pl.LightningModule):
         Returns:
             loss: Loss value.
         """
+        if self.use_gumbel_anneal:
+            global_step = self.global_step
+            if global_step >= self._gumbel_anneal_steps:
+                self._gumbel_tau = self._gumbel_tau_end
+            else:
+                tau_decay = (self._gumbel_tau_start - self._gumbel_tau_end) * (
+                    1 - global_step / self._gumbel_anneal_steps
+                )
+                self._gumbel_tau = self._gumbel_tau_end + tau_decay
+        else:
+            self._gumbel_tau = self._gumbel_tau_end
+
         loss, log_dict = self.forward_and_get_loss(batch, prefix='train/')
         self.log_dict(
             log_dict,
