@@ -68,7 +68,7 @@ num_workers: 16
 lr: 0.00015 # 0.0002
 weight_decay: 0.01
 epochs: 12
-lr_warmup_step: 2000
+lr_warmup_step: 3000
 lr_total_steps: 42000 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
 lr_end_factor: 0.01 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
@@ -77,16 +77,22 @@ precision: "bf16-mixed"
 score_loss_type: "mix" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0
-rank_weight_end: 0.5
-rank_weight_anneal_steps: 50000
+rank_weight_end: 0.1
+rank_weight_anneal_steps: 20000
+
+use_focused_rank_loss: True
+focused_rank_topk: 5
+use_hinge_loss: False
+soft_hinge_loss_weight: 0.1
 
 bce_loss_weight: 1.0
 goal_loss_weight: 0.8
-score_loss_weight: 0.5
+score_loss_weight: 0.2
 predictor_loss_weight: 1.0
+
 traj_loss_weight: 0.4
 denoise_loss_weight: 0.5
-denoiser_loss_weight: 1.0
+denoiser_loss_weight: 0.8
 
 train_encoder: True
 train_denoiser: True

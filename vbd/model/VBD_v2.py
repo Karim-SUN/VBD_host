@@ -51,11 +51,16 @@ class VBD(pl.LightningModule):
 
         self.score_loss_type = cfg.get('score_loss_type', 'bce')
         self.bce_loss_weight = cfg.get('bce_loss_weight', 0.5)
+
         self.use_dynamic_rank_weight = cfg.get('use_dynamic_rank_weight', False)
         self.rank_weight_start = cfg.get('rank_weight_start', 0.0)
         self.rank_weight_end = cfg.get('rank_weight_end', 0.5)
         self.rank_weight_anneal_steps = cfg.get('rank_weight_anneal_steps', 20000)
+        self.use_focused_rank_loss = cfg.get('use_focused_rank_loss', False)
+        self.focused_rank_topk = cfg.get('focused_rank_topk', 3)
         self.rank_loss_weight = 0.0
+        self.use_hinge_loss = cfg.get('use_hinge_loss', False)
+        self.soft_hinge_loss_weight = cfg.get('soft_hinge_loss_weight', 0.0)
 
         self.goal_loss_weight = cfg.get('goal_loss_weight', 1.0)
         self.score_loss_weight = cfg.get('score_loss_weight', 1.0)
@@ -777,7 +782,26 @@ class VBD(pl.LightningModule):
             ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
             log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
             pl_log_probs = ranked_scores - log_denominators
+
+            if self.use_focused_rank_loss:
+                rank_topk_mask = torch.zeros_like(pl_log_probs)
+                rank_topk_mask[:, :self.focused_rank_topk] = 1.0
+                pl_log_probs = pl_log_probs * rank_topk_mask
+
             rank_loss = -pl_log_probs.sum(dim=-1)
+
+            # Soft Contrastive Hinge Loss
+            if self.use_hinge_loss:
+                worst_topk_idx = gt_ranking[:, self.focused_rank_topk - 1]
+                best_bottomk_idx = gt_ranking[:, -self.focused_rank_topk]
+                worst_topk_scores = torch.gather(scores_flat, 1, worst_topk_idx.unsqueeze(-1)).squeeze(-1)
+                best_bottomk_scores = torch.gather(scores_flat, 1, best_bottomk_idx.unsqueeze(-1)).squeeze(-1)
+                score_diff_logits = worst_topk_scores - best_bottomk_scores
+                target = torch.ones_like(score_diff_logits)
+                soft_hinge_loss = binary_cross_entropy_with_logits(
+                    score_diff_logits, target, reduction='none').sum(dim=-1)
+                rank_loss += self.soft_hinge_loss_weight * soft_hinge_loss
+
             score_loss += self.rank_loss_weight * rank_loss
 
         # Average the loss over valid agents
