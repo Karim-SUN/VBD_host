@@ -105,7 +105,8 @@ class GoalPredictor(nn.Module):
         # self.type_decoder = nn.Sequential(nn.Linear(256, 128), nn.ELU(), nn.Dropout(0.1),
         #                                   nn.Linear(128, 10))  # 10 classes
         self.score_decoder = nn.Sequential(nn.Linear(256, 128), nn.ELU(), nn.Dropout(0.1),
-                                           nn.Linear(128, 1), nn.Tanh())
+                                           nn.Linear(128, 1))
+        self.score_norm = nn.LayerNorm(20)
 
     def forward(self, inputs):
         anchors = inputs['anchors'][:, :, :, -1, :]
@@ -131,7 +132,7 @@ class GoalPredictor(nn.Module):
             actions.append(self.act_decoder(query_content).reshape(
                 num_batch, num_queries, self._future_len // self._action_len, 2
             ))
-            scores.append(self.score_decoder(query_content).squeeze(-1))
+            scores.append(self.score_norm(self.score_decoder(query_content).squeeze(-1)))
 
         actions = torch.stack(actions, dim=1)
         scores = torch.stack(scores, dim=1)
