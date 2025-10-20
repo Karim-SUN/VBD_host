@@ -72,6 +72,11 @@ lr_warmup_step: 2000
 lr_total_steps: 42000 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
 lr_end_factor: 0.01 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
+
+# Loss Weights
+score_loss_type: "mix" # 'bce', 'rank', or 'mix'
+bce_loss_weight: 0.5
+rank_loss_weight: 0.5
 goal_loss_weight: 0.8
 score_loss_weight: 0.1
 predictor_loss_weight: 1.0

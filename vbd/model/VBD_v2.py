@@ -5,7 +5,7 @@ from .modules_v2 import Encoder, Denoiser, GoalPredictor
 from .utils import DDPM_Sampler
 from .model_utils_new import (inverse_kinematics, roll_out, batch_transform_trajs_to_global_frame,
                               get_trajectory_type, interpolate_anchors, roll_out_new)
-from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax
+from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax, binary_cross_entropy_with_logits
 import math
 
 
@@ -49,6 +49,9 @@ class VBD(pl.LightningModule):
         self._gumbel_tau_end = cfg.get('gumbel_tau_end', 0.1)
         self._gumbel_anneal_steps = cfg.get('gumbel_anneal_steps', 10000)
 
+        self.score_loss_type = cfg.get('score_loss_type', 'bce')
+        self.bce_loss_weight = cfg.get('bce_loss_weight', 0.5)
+        self.rank_loss_weight = cfg.get('rank_loss_weight', 0.5)
         self.goal_loss_weight = cfg.get('goal_loss_weight', 1.0)
         self.score_loss_weight = cfg.get('score_loss_weight', 1.0)
         self.predictor_loss_weight = cfg.get('predictor_loss_weight', 1.0)
@@ -709,8 +712,8 @@ class VBD(pl.LightningModule):
             agents_interested
     ):
         """
-        Calculates the loss for trajectory prediction using an efficient, vectorized
-        implementation of Plackett-Luce ranking loss.
+        Calculates the loss for trajectory prediction.
+        Supports BCE, Plackett-Luce (rank), and a mix of both for the score loss.
 
         Args:
             trajs (torch.Tensor): Predicted trajectories from GoalPredictor, shape [B, A, Q, T, 3].
@@ -722,7 +725,7 @@ class VBD(pl.LightningModule):
 
         Returns:
             traj_loss_mean (torch.Tensor): Mean regression loss for the best predicted trajectory.
-            score_loss_mean (torch.Tensor): Mean ranking loss based on Plackett-Luce model.
+            score_loss_mean (torch.Tensor): Mean score loss.
         """
         num_batch, num_agents, num_query, _, _ = trajs.shape
         num_timesteps_future = agents_future.shape[2]
@@ -743,19 +746,23 @@ class VBD(pl.LightningModule):
         ade = dist.sum(-1) / torch.clamp(flat_traj_mask.sum(-1, keepdim=True), min=1.0)
         gt_ranking = torch.argsort(ade, dim=-1)
 
-        # --- 2. Efficiently Calculate Plackett-Luce ranking loss ---
-        # Sort the scores according to the ground truth ranking
-        ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
+        # --- 2. Calculate Score Loss based on configured type ---
+        score_loss = 0.0
 
-        # Compute log denominators for the Plackett-Luce likelihood
-        log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
+        # BCE Loss Calculation
+        if self.score_loss_type in ['bce', 'mix']:
+            best_anchor_idx = gt_ranking[:, 0]
+            bce_target = torch.nn.functional.one_hot(best_anchor_idx, num_classes=num_query).float()
+            bce_loss = binary_cross_entropy_with_logits(scores_flat, bce_target, reduction='none').sum(dim=-1)
+            score_loss += self.bce_loss_weight * bce_loss
 
-        # The log probability of the PL distribution is the sum of the log probabilities
-        # of picking the correct item at each step: log(p_k) = r_k - log(sum(exp(r_j)))
-        pl_log_probs = ranked_scores - log_denominators
-        
-        # The total loss is the negative sum of these log probabilities.
-        score_loss = -pl_log_probs.sum(dim=-1)
+        # Rank Loss (Plackett-Luce) Calculation
+        if self.score_loss_type in ['rank', 'mix']:
+            ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
+            log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
+            pl_log_probs = ranked_scores - log_denominators
+            rank_loss = -pl_log_probs.sum(dim=-1)
+            score_loss += self.rank_loss_weight * rank_loss
 
         # Average the loss over valid agents
         score_loss = score_loss * flat_agents_interested
