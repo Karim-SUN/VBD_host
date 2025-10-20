@@ -115,7 +115,7 @@ def train(cfg):
             project=cfg.get("project"),
             entity=cfg.get("username"),
             log_model=False,
-            dir=wandb_save_dir,
+            save_dir=wandb_save_dir,
         )
     else:
         logger = CSVLogger(output_path, name="VBD", version=1, flush_logs_every_n_steps=100)
