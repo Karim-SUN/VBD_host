@@ -105,7 +105,7 @@ class GoalPredictor(nn.Module):
         # self.type_decoder = nn.Sequential(nn.Linear(256, 128), nn.ELU(), nn.Dropout(0.1),
         #                                   nn.Linear(128, 10))  # 10 classes
         self.score_decoder = nn.Sequential(nn.Linear(256, 128), nn.ELU(), nn.Dropout(0.1),
-                                           nn.Linear(128, 1))
+                                           nn.Linear(128, 1)), nn.Tanh()
 
     def forward(self, inputs):
         anchors = inputs['anchors'][:, :, :, -1, :]
