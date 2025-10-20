@@ -51,7 +51,12 @@ class VBD(pl.LightningModule):
 
         self.score_loss_type = cfg.get('score_loss_type', 'bce')
         self.bce_loss_weight = cfg.get('bce_loss_weight', 0.5)
-        self.rank_loss_weight = cfg.get('rank_loss_weight', 0.5)
+        self.use_dynamic_rank_weight = cfg.get('use_dynamic_rank_weight', False)
+        self.rank_weight_start = cfg.get('rank_weight_start', 0.0)
+        self.rank_weight_end = cfg.get('rank_weight_end', 0.5)
+        self.rank_weight_anneal_steps = cfg.get('rank_weight_anneal_steps', 20000)
+        self.rank_loss_weight = 0.0
+
         self.goal_loss_weight = cfg.get('goal_loss_weight', 1.0)
         self.score_loss_weight = cfg.get('score_loss_weight', 1.0)
         self.predictor_loss_weight = cfg.get('predictor_loss_weight', 1.0)
@@ -553,7 +558,8 @@ class VBD(pl.LightningModule):
                 prefix + 'denoise_FDE': denoise_fde,
             })
 
-
+        log_dict['gumbel_tau'] = self._gumbel_tau
+        log_dict['rank_weight'] = self.rank_loss_weight
         log_dict[prefix + 'loss'] = total_loss.item()
 
         if debug:
@@ -572,8 +578,9 @@ class VBD(pl.LightningModule):
         Returns:
             loss: Loss value.
         """
+        global_step = self.global_step
+
         if self.use_gumbel_anneal:
-            global_step = self.global_step
             if global_step >= self._gumbel_anneal_steps:
                 self._gumbel_tau = self._gumbel_tau_end
             else:
@@ -583,6 +590,15 @@ class VBD(pl.LightningModule):
                 self._gumbel_tau = self._gumbel_tau_end + tau_decay
         else:
             self._gumbel_tau = self._gumbel_tau_end
+
+        if self.use_dynamic_rank_weight:
+            if global_step < self.rank_weight_anneal_steps:
+                progress = global_step / self.rank_weight_anneal_steps
+                self.rank_loss_weight = self.rank_weight_start + (self.rank_weight_end - self.rank_weight_start) * progress
+            else:
+                self.rank_loss_weight = self.rank_weight_end
+        else:
+            self.rank_loss_weight = self.rank_weight_end
 
         loss, log_dict = self.forward_and_get_loss(batch, prefix='train/')
         self.log_dict(

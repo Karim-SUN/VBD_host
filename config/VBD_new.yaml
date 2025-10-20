@@ -75,10 +75,14 @@ precision: "bf16-mixed"
 
 # Loss Weights
 score_loss_type: "mix" # 'bce', 'rank', or 'mix'
-bce_loss_weight: 0.5
-rank_loss_weight: 0.5
+use_dynamic_rank_weight: True
+rank_weight_start: 0.0
+rank_weight_end: 0.5
+rank_weight_anneal_steps: 50000
+
+bce_loss_weight: 1.0
 goal_loss_weight: 0.8
-score_loss_weight: 0.1
+score_loss_weight: 0.5
 predictor_loss_weight: 1.0
 traj_loss_weight: 0.4
 denoise_loss_weight: 0.5
