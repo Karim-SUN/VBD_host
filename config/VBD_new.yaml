@@ -10,7 +10,7 @@ log_dir: ./train_log
 use_wandb: True
 username: karim-sun
 project: vbd
-wandb_dir: /home/huang/Mount_Disk/shy/wandb # 自定义wandb日志的根目录
+wandb_dir: /home/huang/Mount_Disk/shy/ # 自定义wandb日志的根目录
 
 # Checkpoint Config
 init_from: null
@@ -56,8 +56,8 @@ anchor_incre_max: [7, 2]
 
 # Training Params
 seed: 21
-batch_size: 1
-num_workers: 16
+batch_size: 8
+num_workers: 20
 lr: 0.00015 # 0.0002
 weight_decay: 0.01
 epochs: 12
