@@ -81,6 +81,7 @@ class VBD(pl.LightningModule):
         self._normalize_anchors = cfg.get('normalize_anchors', False)
 
         self.batch_size = cfg['batch_size']
+        self.accumulate_grad_batches = cfg.get('accumulate_grad_batches', 1)
         self.anchor = np.load('/home/karim/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
         self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
         self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
@@ -155,8 +156,8 @@ class VBD(pl.LightningModule):
             weight_decay=self.cfg['weight_decay']
         )
 
-        warmup_steps = self.cfg['lr_warmup_step']
-        total_steps = self.cfg['lr_total_steps']
+        warmup_steps = self.cfg['lr_warmup_step'] // self.accumulate_grad_batches
+        total_steps = self.cfg['lr_total_steps'] // self.accumulate_grad_batches
         end_factor = self.cfg.get('lr_end_factor', 0.01)
 
         def lr_lambda(current_step: int):
@@ -592,19 +593,19 @@ class VBD(pl.LightningModule):
         global_step = self.global_step
 
         if self.use_gumbel_anneal:
-            if global_step >= self._gumbel_anneal_steps:
+            if global_step >= self._gumbel_anneal_steps // self.accumulate_grad_batches:
                 self._gumbel_tau = self._gumbel_tau_end
             else:
                 tau_decay = (self._gumbel_tau_start - self._gumbel_tau_end) * (
-                    1 - global_step / self._gumbel_anneal_steps
+                    1 - global_step / (self._gumbel_anneal_steps // self.accumulate_grad_batches)
                 )
                 self._gumbel_tau = self._gumbel_tau_end + tau_decay
         else:
             self._gumbel_tau = self._gumbel_tau_end
 
         if self.use_dynamic_rank_weight:
-            if global_step < self.rank_weight_anneal_steps:
-                progress = global_step / self.rank_weight_anneal_steps
+            if global_step < self.rank_weight_anneal_steps // self.accumulate_grad_batches:
+                progress = global_step / (self.rank_weight_anneal_steps // self.accumulate_grad_batches)
                 self.rank_loss_weight = self.rank_weight_start + (self.rank_weight_end - self.rank_weight_start) * progress
             else:
                 self.rank_loss_weight = self.rank_weight_end

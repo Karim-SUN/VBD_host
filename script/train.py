@@ -132,10 +132,10 @@ def train(cfg):
         detect_anomaly=False,
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
-        accumulate_grad_batches=8,
+        accumulate_grad_batches=cfg.get("accumulate_grad_batches", 1),
         num_sanity_val_steps=0,
         precision=cfg.get("precision", "32-true"),
-        log_every_n_steps=100,
+        log_every_n_steps=cfg.get("accumulate_grad_batches", 1) * 10,
         callbacks=[
             ModelCheckpoint(
                 dirpath=output_path,
