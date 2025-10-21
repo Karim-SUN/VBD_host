@@ -22,7 +22,7 @@ action_len: 2
 encoder_layers: 6
 
 # Encoder
-history_dropout: 0.4
+history_dropout: 0.2
 
 # Task Probabilities for get_random_mask
 task_probabilities:
@@ -35,7 +35,7 @@ task_probabilities:
 #prediction_type: sample
 prediction_type: sample
 encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
-use_gumbel_anneal: False
+use_gumbel_anneal: True
 gumbel_tau_start: 1.0
 gumbel_tau_end: 0.1
 gumbel_anneal_steps: 20000
@@ -74,7 +74,7 @@ score_loss_type: "mix" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0
 rank_weight_end: 0.1
-rank_weight_anneal_steps: 20000
+rank_weight_anneal_steps: 40000
 
 use_focused_rank_loss: True
 focused_rank_topk: 5
