@@ -38,7 +38,7 @@ encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 use_gumbel_anneal: True
 gumbel_tau_start: 1.0
 gumbel_tau_end: 0.1
-gumbel_anneal_steps: 20000
+gumbel_anneal_steps: 6000
 
 # Diffusion Params
 diffusion_steps: 1000
@@ -59,9 +59,10 @@ anchor_incre_max: [7, 2]
 
 # Training Params
 seed: 21
-batch_size: 8
+batch_size: 2
 num_workers: 20
-lr: 0.00015 # 0.0002
+accumulate_grad_batches: 8 # 会影响实际的lr steps等
+lr: 0.0002 # 0.0002
 weight_decay: 0.01
 epochs: 12
 lr_warmup_step: 1000
