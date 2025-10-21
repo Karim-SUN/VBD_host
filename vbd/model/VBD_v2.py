@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import bitsandbytes.optim as bnb_optim
 import lightning.pytorch as pl
 from .modules_v2 import Encoder, Denoiser, GoalPredictor
 from .utils import DDPM_Sampler
@@ -143,7 +144,12 @@ class VBD(pl.LightningModule):
 
         assert len(params_to_update) > 0, 'No parameters to update'
 
-        optimizer = torch.optim.AdamW(
+        # optimizer = torch.optim.AdamW(
+        #     params_to_update,
+        #     lr=self.cfg['lr'],
+        #     weight_decay=self.cfg['weight_decay']
+        # )
+        optimizer = bnb_optim.AdamW8bit(  # 使用 8-bit 版本
             params_to_update,
             lr=self.cfg['lr'],
             weight_decay=self.cfg['weight_decay']
