@@ -7,7 +7,7 @@ anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
 log_dir: ./train_log
 
 # Wandb Config
-use_wandb: True
+use_wandb: False
 username: karim-sun
 project: vbd
 wandb_dir: /home/huang/Mount_Disk/shy/ # 自定义wandb日志的根目录
@@ -38,7 +38,7 @@ encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 use_gumbel_anneal: True
 gumbel_tau_start: 1.0
 gumbel_tau_end: 0.1
-gumbel_anneal_steps: 6000
+gumbel_anneal_steps: 4000
 
 # Diffusion Params
 diffusion_steps: 1000
@@ -61,7 +61,7 @@ anchor_incre_max: [7, 2]
 seed: 21
 batch_size: 2
 num_workers: 20
-accumulate_grad_batches: 8 # 会影响实际的lr steps等
+accumulate_grad_batches: 1 # 会影响实际的lr steps等
 lr: 0.0002 # 0.0002
 weight_decay: 0.01
 epochs: 12
@@ -69,6 +69,7 @@ lr_warmup_step: 1000
 lr_total_steps: 42000 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
 lr_end_factor: 0.02 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
+random_target: 0.1
 
 # Loss Weights
 score_loss_type: "mix" # 'bce', 'rank', or 'mix'

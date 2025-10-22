@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
+from torch.utils.checkpoint import checkpoint
 from .model_utils import (batch_transform_trajs_to_local_frame,
                           batch_transform_polylines_to_local_frame,
                           batch_transform_trajs_to_global_frame,
@@ -397,9 +398,13 @@ class SelfTransformer(nn.Module):
                                  nn.Linear(dim * 4, dim), nn.Dropout(dropout))
 
     def forward(self, inputs, relations, mask=None):
-        attention_output = self.qc_attention(inputs, relations, mask)
+        # attention_output = self.qc_attention(inputs, relations, mask)
+        # attention_output = self.norm_1(attention_output + inputs)
+        # output = self.norm_2(self.ffn(attention_output) + attention_output)
+        attention_output = checkpoint(self.qc_attention, inputs, relations, mask, use_reentrant=False)
         attention_output = self.norm_1(attention_output + inputs)
-        output = self.norm_2(self.ffn(attention_output) + attention_output)
+        ffn_output = checkpoint(self.ffn, attention_output, use_reentrant=False)
+        output = self.norm_2(ffn_output + attention_output)
 
         return output
 
@@ -472,15 +477,43 @@ class CrossTransformer(nn.Module):
         key = key + relations
         value = key
 
-        if key_mask is not None:
-            attention_output, _ = self.cross_attention(query, key, value, key_padding_mask=key_mask)
-        elif attn_mask is not None:
-            attention_output, _ = self.cross_attention(query, key, value, attn_mask=attn_mask)
-        else:
-            attention_output, _ = self.cross_attention(query, key, value)
+        # if key_mask is not None:
+        #     attention_output, _ = self.cross_attention(query, key, value, key_padding_mask=key_mask)
+        # elif attn_mask is not None:
+        #     attention_output, _ = self.cross_attention(query, key, value, attn_mask=attn_mask)
+        # else:
+        #     attention_output, _ = self.cross_attention(query, key, value)
 
+        # attention_output = self.norm_1(attention_output)
+        # output = self.norm_2(self.ffn(attention_output) + attention_output)
+
+        def _run_attention(cross_attn_module, query, key, value, attn_mask, key_mask):
+            if key_mask is not None:
+                return cross_attn_module(query, key, value, key_padding_mask=key_mask)[0]
+            elif attn_mask is not None:
+                return cross_attn_module(query, key, value, attn_mask=attn_mask)[0]
+            else:
+                return cross_attn_module(query, key, value)[0]
+
+        attention_output = checkpoint(
+            _run_attention,
+            self.cross_attention,
+            query,
+            key,
+            value,
+            attn_mask,
+            key_mask,
+            use_reentrant=False
+        )
+        
         attention_output = self.norm_1(attention_output)
-        output = self.norm_2(self.ffn(attention_output) + attention_output)
+
+        ffn_output = checkpoint(
+            self.ffn, 
+            attention_output, 
+            use_reentrant=False
+        )
+        output = self.norm_2(ffn_output + attention_output)
 
         return output
 
