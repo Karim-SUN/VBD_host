@@ -156,10 +156,10 @@ class Denoiser(nn.Module):
     def forward(self, encoder_inputs, noised_trajs, diffusion_step, rollout=True):
         '''
         Args:
-            noised_trajs: [B, A, T_r, 2], [acc, yaw_rate] Unnormalized actions
+            noised_target_offset: [B, A, T_r, 2], [acc, yaw_rate] Unnormalized actions
             diffusion_step: [B, A]
         Output:
-            denoised_states: [B, A, T, 3], [x, y, theta]
+            denoised_output: [B, A, T_r, 2], [x, y]
         '''
         noised_trajs = noised_trajs[:, :self._agents_len]
 
@@ -195,10 +195,13 @@ class Denoiser(nn.Module):
             encodings, relations, mask
         )
 
-        # Decoder learns the offset
-        decoded_trajs = noised_trajs + decoder_output
+        # # Decoder learns the offset
+        # decoded_trajs = noised_trajs + decoder_output
 
-        return decoded_trajs
+        # return decoded_trajs
+
+        # Decoder learns the target offset
+        return decoder_output
 
     def reset_agent_length(self, agents_len):
         self._agents_len = agents_len
