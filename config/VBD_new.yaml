@@ -23,7 +23,7 @@ init_from: null
 agents_len: 16
 future_len: 80
 action_len: 2
-encoder_layers: 6
+encoder_layers: 4
 
 # Encoder
 history_dropout: 0.2
@@ -64,8 +64,8 @@ anchor_incre_max: [7, 2]
 seed: 21
 batch_size: 2
 num_workers: 20
-accumulate_grad_batches: 1 # 会影响实际的lr steps等
-lr: 0.0002 # 0.0002
+accumulate_grad_batches: 4 # 会影响实际的lr steps等
+lr: 0.00018 # 0.0002
 weight_decay: 0.01
 epochs: 12
 lr_warmup_step: 600
@@ -75,7 +75,7 @@ precision: "bf16-mixed"
 random_target: 0.1
 
 # Loss Weights
-score_loss_type: "mix" # 'bce', 'rank', or 'mix'
+score_loss_type: "bce" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0
 rank_weight_end: 0.1
@@ -92,7 +92,7 @@ score_loss_weight: 0.2
 predictor_loss_weight: 1.0
 
 traj_loss_weight: 0.4
-denoise_loss_weight: 1.0
+denoise_loss_weight: 80
 denoiser_loss_weight: 0.8
 
 train_encoder: True
