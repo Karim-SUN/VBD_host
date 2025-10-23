@@ -1,5 +1,5 @@
 # Local configurations
-config/VBD_new.yaml
+# config/VBD_new.yaml
 
 # Logs and training artifacts
 train_log/
