@@ -615,7 +615,7 @@ class VBD(pl.LightningModule):
         loss, log_dict = self.forward_and_get_loss(batch, prefix='train/')
         self.log_dict(
             log_dict,
-            on_step=False, on_epoch=False, sync_dist=True,
+            on_step=True, on_epoch=False, sync_dist=True,
             prog_bar=True
         )
 
