@@ -216,7 +216,7 @@ class VBD(pl.LightningModule):
         """
 
         denoiser_output = self.denoiser(encoder_outputs, noised_inputs, diffusion_step, rollout=False)
-        denoised_offset = self.noise_scheduler.q_x0(
+        denoised_offset_norm = self.noise_scheduler.q_x0(
             denoiser_output,
             diffusion_step,
             noised_inputs,
@@ -228,6 +228,7 @@ class VBD(pl.LightningModule):
 
         # Roll out
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
+        denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
         final_offset = denoised_offset + anchor_diff
         denoised_trajs, denoised_trajs_origin = roll_out_new(
             current_states, final_offset, global_frame=True)
@@ -438,12 +439,12 @@ class VBD(pl.LightningModule):
                 noise,
                 diffusion_steps
             )
-            noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
+            # noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
 
-            noised_target_offset = self.unnormalize_anchor_increments(noised_target_offset_norm) # B, A_pred, T_future_steps, 2
+            # noised_target_offset = self.unnormalize_anchor_increments(noised_target_offset_norm) # B, A_pred, T_future_steps, 2
 
             # Inverse diffusion
-            denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset,
+            denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
                                                     best_pred_anchor_diff)
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
