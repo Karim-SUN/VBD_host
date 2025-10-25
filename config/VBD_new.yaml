@@ -92,5 +92,5 @@ denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 
 train_encoder: True
-train_denoiser: True
+train_denoiser: False
 train_predictor: True
