@@ -216,16 +216,16 @@ def plot_trajectory(
       show_colorbar=show_colorbar
   )
 
-  # Plot future of controlled agents
-  if is_ego is not None:
-    ego_traj = traj.pred_trajs[is_ego, :, :2]
-    ego_traj = np.pad(ego_traj, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=1)
-    plot_traj_with_time(
-      obj_type_list = ['TYPE_VEHICLE'],
-      trajs = ego_traj,
-      timestamps_seconds=np.arange(traj.shape[-1] - time_idx).tolist(),
-      ax=ax
-    )
+  # # Plot future of controlled agents
+  # if is_ego is not None:
+  #   ego_traj = traj.pred_trajs[is_ego, :, :2]
+  #   ego_traj = np.pad(ego_traj, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=1)
+  #   plot_traj_with_time(
+  #     obj_type_list = ['TYPE_VEHICLE'],
+  #     trajs = ego_traj,
+  #     timestamps_seconds=np.arange(traj.shape[-1] - time_idx).tolist(),
+  #     ax=ax
+  #   )
 
 def plot_traffic_light_signals_as_points(
     ax: matplotlib.axes.Axes,

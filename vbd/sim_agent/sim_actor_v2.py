@@ -538,12 +538,25 @@ class VBDTest(VBD):
         batch = self.batch_to_device(batch, self.device)
 
         # data inputs
-        agents_future = batch['agents_future'][:, :self._agents_len]
-        B, A, T_future, D0 = agents_future.shape
-        T = T_future // self._action_len
-        D = 2
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, A, -1, -1, -1)
-        anchors = batch['anchors'][:, :self._agents_len]
+        agents_future = batch['agents_future']
+        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(agents_future.shape[0], self._agents_len, -1, -1, -1)
+
+        agents_future_valid = torch.ne(agents_future.sum(-1), 0)
+        agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
+            agents_future_valid) & agents_future_valid
+        agents_interested = batch['agents_interested']
+        anchors = batch['anchors']
+
+        B, A_pred, Q, T_future_and_cur, D_predict = anchors.shape
+        T_future_steps = T_future_and_cur // self._action_len
+
+        # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
+        agents_history = batch['agents_history']
+        agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[..., :5]), dim=-2)
+        batch['agents_features'] = agents_features
+        T_history_and_cur = agents_history.shape[-2]
+        batch['T_history_and_cur'] = T_history_and_cur
+        batch['T_history_and_cur'] = agents_history.shape[-2]
 
         # Try to calculate loss
         if calc_loss:
@@ -553,7 +566,9 @@ class VBDTest(VBD):
         
         encoder_outputs = self.encoder(batch)
 
-
+        agents_future = agents_future[:, :self._agents_len]
+        agents_future_valid = agents_future_valid[:, :self._agents_len]
+        agents_interested = agents_interested[:, :self._agents_len]
 
         # Motion Prior Prediction
         goal_outputs = self.forward_predictor(encoder_outputs)
@@ -563,9 +578,8 @@ class VBDTest(VBD):
         # get predicted anchor
         assert goal_scores != None, 'No valid goal predictions yet.'
         B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
-        A_idx = torch.arange(A).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
+        A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
         goal_index = goal_scores.argmax(-1)
-        goal_index = torch.full((B, A), 11, device=goal_scores.device, dtype=torch.long)  # 全部设置为9
 
         # batch_index_mask = torch.rand(B) < 0.999
         # random_index = torch.randint(0, 20, goal_index.shape).to(goal_index.device)
@@ -574,13 +588,13 @@ class VBDTest(VBD):
         target_anchors_gt = anchors[B_idx, A_idx, goal_index, :, :]  # 索引数据
         anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # 计算相邻锚点的差值
 
-
+        anchors_input = self.normalize_anchor_increments(anchors_input)
 
 
         # Calc Noise
         diffusion_steps = torch.full(
-            size=(B, A, 1, 1),
-            fill_value=self.noise_scheduler.num_steps * 1 // 5,
+            size=(B, self._agents_len, 1, 1),
+            fill_value=self.noise_scheduler.num_steps * 1 // 50,
             device=agents_future.device,
             dtype=torch.long
         )
@@ -590,12 +604,15 @@ class VBDTest(VBD):
         # ).long().unsqueeze(-1).repeat(1, A).view(B, A, 1, 1) + self.noise_scheduler.num_steps // 2
         # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
 
-        noise = torch.randn(B, A, T, D).type_as(agents_future)
+        noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
+
         x_t = self.noise_scheduler.add_noise(
             anchors_input,  # .reshape(B*A, T, D),
             noise,
             diffusion_steps  # , .reshape(B*A),
         )
+        x_t = torch.clamp(x_t, min=-1, max=1)
+        x_t = self.unnormalize_anchor_increments(x_t)
 
 
         
@@ -608,7 +625,7 @@ class VBDTest(VBD):
         action_dim = 2
         
         # diffusion_steps = list(reversed(range(self.early_stop, self.noise_scheduler.num_steps * 1 // 10, self.skip)))
-        diffusion_steps = list(reversed(range(10, self.noise_scheduler.num_steps * 1 // 5 + 1, self.skip)))
+        diffusion_steps = list(reversed(range(10, self.noise_scheduler.num_steps * 1 // 50 + 1, self.skip)))
 
         # History
         x_t_history = []
