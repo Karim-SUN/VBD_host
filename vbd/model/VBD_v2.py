@@ -84,7 +84,7 @@ class VBD(pl.LightningModule):
 
         self.batch_size = cfg['batch_size']
         self.accumulate_grad_batches = cfg.get('accumulate_grad_batches', 1)
-        self.anchor = np.load('/home/huang/Mount_Disk/shy/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
+        self.anchor = np.load('vbd/data/kmeans_navsim_traj_20.npy')
         self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
         self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
 
@@ -375,8 +375,14 @@ class VBD(pl.LightningModule):
             agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur - 1)
             # B, A_pred, T_future_and_cur, 2
             gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :2]
+
+            valid_sparse = agents_future_valid[:, :self._agents_len, ::2]  # B, A_pred, T_future_steps
+            diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, 40]
+            diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, 40, 1] 以便广播
+
             # B, A_pred, T_future_steps, 2
             gt_future_diff = torch.diff(gt_future_local[:, :, ::2, :], dim=-2)
+            gt_future_diff = gt_future_diff * diff_valid_mask.float()
 
             # Use best matched anchor to train
             best_anchor_idx = gt_ranking[:, 0].view(B, self._agents_len)  # B, A_pred
@@ -387,6 +393,7 @@ class VBD(pl.LightningModule):
                 B_idx, A_idx, best_anchor_idx
             ]  # B, A_pred, T_future_steps, 2
             target_offset = gt_future_diff - best_anchor_diff  # B, A_pred, T_future_steps, 2
+            target_offset = target_offset * diff_valid_mask.float()
 
             # Predicted anchor
             best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
@@ -794,8 +801,10 @@ class VBD(pl.LightningModule):
 
         # --- 3. Calculate regression loss for the best *predicted* trajectory ---
         trajs_pred_flat = trajs.flatten(0, 1)[:, :, :, :2]
-        best_pred_idx = torch.argmax(scores_flat, dim=-1)
-        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
+        best_gt_idx = gt_ranking[:, 0]
+        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_gt_idx]
+        # best_pred_idx = torch.argmax(scores_flat, dim=-1)
+        # trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
         
         traj_loss = smooth_l1_loss(trajs_select[:, :num_timesteps_future-1], trajs_gt, reduction='none').sum(-1)
         traj_loss = traj_loss * flat_traj_mask
