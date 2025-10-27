@@ -4,7 +4,9 @@ import bitsandbytes.optim as bnb_optim
 import lightning.pytorch as pl
 from .modules_v2 import Encoder, Denoiser, GoalPredictor
 from .utils import DDPM_Sampler
-from .model_utils_new import (inverse_kinematics, roll_out, batch_transform_trajs_to_global_frame,
+from .model_utils_new import (inverse_kinematics, roll_out, 
+                              batch_transform_trajs_to_global_frame,
+                              batch_transform_trajs_to_local_frame,
                               get_trajectory_type, interpolate_anchors, roll_out_new)
 from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax, binary_cross_entropy_with_logits
 import math
@@ -82,7 +84,7 @@ class VBD(pl.LightningModule):
 
         self.batch_size = cfg['batch_size']
         self.accumulate_grad_batches = cfg.get('accumulate_grad_batches', 1)
-        self.anchor = np.load('/home/karim/VBD_host/vbd/data/kmeans_navsim_traj_20.npy')
+        self.anchor = np.load('vbd/data/kmeans_navsim_traj_20.npy')
         self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
         self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
 
@@ -145,11 +147,6 @@ class VBD(pl.LightningModule):
 
         assert len(params_to_update) > 0, 'No parameters to update'
 
-        # optimizer = torch.optim.AdamW(
-        #     params_to_update,
-        #     lr=self.cfg['lr'],
-        #     weight_decay=self.cfg['weight_decay']
-        # )
         optimizer = bnb_optim.AdamW8bit(  # 使用 8-bit 版本
             params_to_update,
             lr=self.cfg['lr'],
@@ -204,7 +201,7 @@ class VBD(pl.LightningModule):
 
         return output_dict
 
-    def forward_denoiser(self, encoder_outputs, noised_anchors_gt, diffusion_step):
+    def forward_denoiser(self, encoder_outputs, noised_inputs, diffusion_step, anchor_diff):
         """
         Forward pass of the denoiser module.
 
@@ -212,42 +209,33 @@ class VBD(pl.LightningModule):
             encoder_outputs: Outputs from the encoder module.
             noised_actions: noised actions.
             diffusion_step: Diffusion step.
+            anchor_diff: Best Anchor TD.
 
         Returns:
             denoiser_outputs: Dictionary containing the denoiser outputs.
         """
-        # noised_actions = self.unnormalize_actions(noised_actions_normalized)
-        # denoiser_output = self.denoiser(encoder_outputs, noised_actions, diffusion_step)
-        denoiser_output = self.denoiser(encoder_outputs, noised_anchors_gt, diffusion_step, rollout=False)
-        # denoised_traj_increments = self.noise_scheduler.q_x0(
-        #     denoiser_output,
-        #     diffusion_step,
-        #     noised_anchors_gt,
-        #     prediction_type=self._prediction_type
-        # )
-        # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
+
+        denoiser_output = self.denoiser(encoder_outputs, noised_inputs, diffusion_step, rollout=False)
+        denoised_offset_norm = self.noise_scheduler.q_x0(
+            denoiser_output,
+            diffusion_step,
+            noised_inputs,
+            prediction_type=self._prediction_type
+        )
         T_history_and_cur = encoder_outputs['T0']
         current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
         assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
-        # denoised_actions = self.unnormalize_actions(denoised_actions_normalized)
-        # denoised_trajs = roll_out(current_states, denoised_actions,
-        #                           action_len=self.denoiser._action_len, dt=self._dt, global_frame=True)
-
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
+        denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
+        final_diff = denoised_offset + anchor_diff
         denoised_trajs, denoised_trajs_origin = roll_out_new(
-            current_states, denoiser_output, global_frame=True)
+            current_states, final_diff, global_frame=True)
 
-
-        # return {
-        #     'denoiser_output': denoiser_output,
-        #     'denoised_actions_normalized': denoised_actions_normalized,
-        #     'denoised_actions': denoised_actions,
-        #     'denoised_trajs': denoised_trajs,
-        # }
         return {
             'denoiser_output': denoiser_output,
+            'denoised_offset': denoised_offset,
             'denoised_trajs': denoised_trajs,
             'denoised_trajs_origin': denoised_trajs_origin,
         }
@@ -278,12 +266,6 @@ class VBD(pl.LightningModule):
         goal_trajs = roll_out(current_states[:, :, None, :], goal_actions,
                               action_len=self.predictor._action_len, global_frame=True)
 
-        # return {
-        #     'goal_actions_normalized': goal_actions_normalized,
-        #     'goal_actions': goal_actions,
-        #     'goal_scores': goal_scores,
-        #     'goal_trajs': goal_trajs,
-        # }
         return {
             'goal_actions_normalized': goal_actions_normalized,
             'goal_actions': goal_actions,
@@ -308,34 +290,24 @@ class VBD(pl.LightningModule):
         """
         # data inputs
         agents_future = batch['agents_future']
-        B, A_all, T_future, D_all = agents_future.shape
-        T_future_steps = T_future // self._action_len
+        B, A_all, T_future_and_cur, D_all = agents_future.shape
+        T_future_steps = T_future_and_cur // self._action_len
         D_predict = 2
+        # batch['anchors']: B, A_pred, Q, T_future_and_cur, D_predict
         batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
 
         # TODO: Investigate why this to NAN
         # agents_future_valid = batch['agents_future_valid'][:, :self._agents_len]
         agents_future_valid = torch.ne(agents_future.sum(-1), 0)
         agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
-            agents_future_valid) & agents_future_valid
+            agents_future_valid) & agents_future_valid # B, A_all, T_future_and_cur
         agents_interested = batch['agents_interested']
         anchors = batch['anchors']
-
-        # # get actions from trajectory
-        # gt_actions, gt_actions_valid = inverse_kinematics(
-        #     agents_future,
-        #     agents_future_valid,
-        #     dt=self._dt,
-        #     action_len=self._action_len,
-        # )
-        #
-        # gt_actions_normalized = self.normalize_actions(gt_actions)
-        # B, A, T, D = gt_actions_normalized.shape
         
         # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
         agents_history = batch['agents_history']
         agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[..., :5]), dim=-2)
-        batch['agents_features'] = agents_features
+        batch['agents_features'] = agents_features # B, A_all, T_history_and_cur + T_future_and_cur - 1, 5
         T_history_and_cur = agents_history.shape[-2]
         batch['T_history_and_cur'] = T_history_and_cur
         batch['T_history_and_cur'] = agents_history.shape[-2]
@@ -346,11 +318,13 @@ class VBD(pl.LightningModule):
 
         goal_scores = None
 
+
         ############## Run Encoder ##############
         encoder_outputs = self.encoder(batch)
-        agents_future = agents_future[:, :self._agents_len]
-        agents_future_valid = agents_future_valid[:, :self._agents_len]
-        agents_interested = agents_interested[:, :self._agents_len]
+        agents_future = agents_future[:, :self._agents_len] # B, A_pred, T_future_and_cur, 5
+        agents_future_valid = agents_future_valid[:, :self._agents_len] # B, A_pred, T_future_and_cur
+        agents_interested = agents_interested[:, :self._agents_len] # B, A_pred
+
 
         ############### Behavior Prior Prediction #################
         if self._train_predictor:
@@ -358,22 +332,21 @@ class VBD(pl.LightningModule):
             debug_outputs.update(goal_outputs)
 
             # get loss
-            goal_scores = goal_outputs['goal_scores']
+            goal_scores = goal_outputs['goal_scores'] # B, A_pred, Q
             # goal_types = goal_outputs['goal_types']
-            goal_trajs = goal_outputs['goal_trajs']
+            goal_trajs = goal_outputs['goal_trajs'] # B, A_pred, Q, T_future, 5
 
-            goal_loss_mean, score_loss_mean = self.goal_loss(
+            (goal_loss_mean, 
+            score_loss_mean, 
+            gt_ranking, # B * A_pred, Q 
+            ade_for_ranking # B * A_pred, Q
+            ) = self.goal_loss(
                 goal_trajs, goal_scores, agents_future,
                 agents_future_valid, anchors,
                 agents_interested,
             )
-            # goal_loss_mean, type_loss_mean = self.goal_loss_new(
-            #     goal_trajs, goal_types, agents_future,
-            #     agents_future_valid, agents_interested
-            # )
 
             pred_loss = self.goal_loss_weight * goal_loss_mean + self.score_loss_weight * score_loss_mean
-            # pred_loss = goal_loss_mean + 0.05 * type_loss_mean
             total_loss += self.predictor_loss_weight * pred_loss
 
             pred_ade, pred_fde = self.calculate_metrics_predict(
@@ -389,12 +362,6 @@ class VBD(pl.LightningModule):
                 prefix + 'pred_ADE': pred_ade,
                 prefix + 'pred_FDE': pred_fde,
             })
-            # log_dict.update({
-            #     prefix + 'goal_loss': goal_loss_mean.item(),
-            #     prefix + 'score_loss': type_loss_mean.item(),
-            #     prefix + 'pred_ADE': pred_ade,
-            #     prefix + 'pred_FDE': pred_fde,
-            # })
 
 
         ############### Denoise #################
@@ -402,94 +369,95 @@ class VBD(pl.LightningModule):
             # get predicted anchor
             assert goal_scores != None, 'No valid goal predictions yet.'
             B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
-            A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
-            # Use Gumbel-Softmax for differentiable sampling of anchors
-            goal_one_hot = gumbel_softmax(goal_scores, tau=self._gumbel_tau, hard=True, dim=-1)
+            A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A_pred] 的车辆索引
 
-            # Introduce random exploration
-            batch_index_mask = torch.rand(B, device=goal_scores.device) < self._random_target
-            if batch_index_mask.any():
-                num_anchors = goal_scores.shape[-1]
-                random_indices = torch.randint(0, num_anchors, (B, self._agents_len), device=goal_scores.device)
-                random_one_hot = torch.nn.functional.one_hot(random_indices, num_classes=num_anchors).float()
+            # B, A_all, T_history_and_cur + T_future_and_cur - 1, 5
+            agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur - 1)
+            # B, A_pred, T_future_and_cur, 2
+            gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :2]
+
+            valid_sparse = agents_future_valid[:, :self._agents_len, ::2]  # B, A_pred, T_future_steps
+            diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, 40]
+            diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, 40, 1] 以便广播
+
+            # B, A_pred, T_future_steps, 2
+            gt_future_diff = torch.diff(gt_future_local[:, :, ::2, :], dim=-2)
+            gt_future_diff = gt_future_diff * diff_valid_mask.float()
+
+            # Use best matched anchor to train
+            best_anchor_idx = gt_ranking[:, 0].view(B, self._agents_len)  # B, A_pred
+
+            all_anchor_diff = torch.diff(anchors[:, :, :, ::2, :], dim=-2)  # B, A_pred, Q, T_future_steps, 2
+
+            best_anchor_diff = all_anchor_diff[
+                B_idx, A_idx, best_anchor_idx
+            ]  # B, A_pred, T_future_steps, 2
+            target_offset = gt_future_diff - best_anchor_diff  # B, A_pred, T_future_steps, 2
+            target_offset = target_offset * diff_valid_mask.float()
+
+            # Predicted anchor
+            best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
+            best_pred_anchor_diff = all_anchor_diff[
+                B_idx, A_idx, best_pred_anchor_idx
+            ]  # B, A_pred, T_future_steps, 2
+
+            # # Use Gumbel-Softmax for differentiable sampling of anchors
+            # goal_one_hot = gumbel_softmax(goal_scores, tau=self._gumbel_tau, hard=True, dim=-1)
+
+            # # Introduce random exploration
+            # batch_index_mask = torch.rand(B, device=goal_scores.device) < self._random_target
+            # if batch_index_mask.any():
+            #     num_anchors = goal_scores.shape[-1]
+            #     random_indices = torch.randint(0, num_anchors, (B, self._agents_len), device=goal_scores.device)
+            #     random_one_hot = torch.nn.functional.one_hot(random_indices, num_classes=num_anchors).float()
                 
-                # Apply random selection only for masked batches
-                # Unsqueeze batch_index_mask to match dimensions for broadcasting
-                goal_one_hot = torch.where(batch_index_mask.unsqueeze(-1).unsqueeze(-1), random_one_hot, goal_one_hot)
+            #     # Apply random selection only for masked batches
+            #     # Unsqueeze batch_index_mask to match dimensions for broadcasting
+            #     goal_one_hot = torch.where(batch_index_mask.unsqueeze(-1).unsqueeze(-1), random_one_hot, goal_one_hot)
 
-            # Select anchors using the one-hot tensor
-            # Reshape one-hot tensor to [B, A, num_anchors, 1, 1] for broadcasting
-            selected_anchors_one_hot = goal_one_hot.unsqueeze(-1).unsqueeze(-1)
-            # Multiply and sum to select the target anchors
-            target_anchors_gt = (anchors * selected_anchors_one_hot).sum(dim=2)
+            # # Select anchors using the one-hot tensor
+            # # Reshape one-hot tensor to [B, A, num_anchors, 1, 1] for broadcasting
+            # selected_anchors_one_hot = goal_one_hot.unsqueeze(-1).unsqueeze(-1)
+            # # Multiply and sum to select the target anchors
+            # target_anchors_gt = (anchors * selected_anchors_one_hot).sum(dim=2)
 
-            anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # Calculate increments from anchors
-
-            # get actions from anchors
-            # gt_actions, gt_actions_valid = inverse_kinematics(
-            #     anchors_gt,
-            #     agents_future_valid,
-            #     dt=self._dt,
-            #     action_len=self._action_len,
-            # )
-            # gt_actions_normalized = self.normalize_actions(gt_actions)
-
-            # sample noise
-            # noise = torch.randn(B*A, T, D).type_as(agents_future)
+            # anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # Calculate increments from anchors
 
             diffusion_steps = torch.randint(
                 1, self.noise_scheduler.num_steps * 1 // 20, (B,),
                 device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1)
+            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) # B, A_pred, 1, 1
 
-            random_diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps * 3 // 40, (B,),
-                device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
+            # random_diffusion_steps = torch.randint(
+            #     1, self.noise_scheduler.num_steps * 3 // 40, (B,),
+            #     device=agents_future.device
+            # ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
 
-            diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
+            # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
 
-            noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
+            # noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
-            # noise the input
-            # noised_action_normalized = self.noise_scheduler.add_noise(
-            #     gt_actions_normalized,  # .reshape(B*A, T, D),
-            #     noise,
-            #     diffusion_steps  # , .reshape(B*A),
-            # )  # .reshape(B, A, T, D)
+            noise = torch.randn_like(target_offset) # B, A_pred, T_future_steps, 2
 
-            anchors_input = self.normalize_anchor_increments(anchors_input)
+            target_offset_norm = self.normalize_anchor_increments(target_offset)
 
-            noised_anchors_gt = self.noise_scheduler.add_noise(
-                anchors_input,  # .reshape(B*A, T, D),
+            noised_target_offset_norm = self.noise_scheduler.add_noise(
+                target_offset_norm,
                 noise,
-                diffusion_steps  # , .reshape(B*A),
+                diffusion_steps
             )
-            noised_anchors_gt = torch.clamp(noised_anchors_gt, min=-1, max=1)
+            # noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
 
-            noised_anchors_gt = self.unnormalize_anchor_increments(noised_anchors_gt)
+            # noised_target_offset = self.unnormalize_anchor_increments(noised_target_offset_norm) # B, A_pred, T_future_steps, 2
 
-            # if self._replay_buffer:
-            #     with torch.no_grad():
-            #         # Forward for one step
-            #         denoise_outputs = self.forward_denoiser(encoder_outputs, gt_actions_normalized,
-            #                                                 diffusion_steps.view(B, A))
-            #
-            #         x_0 = denoise_outputs['denoised_actions_normalized']
-            #
-            #         # Step to sample from P(x_t-1 | x_t, x_0)
-            #         x_t_prev = self.noise_scheduler.step(
-            #             model_output=x_0,
-            #             timesteps=diffusion_steps,
-            #             sample=noised_action_normalized,
-            #             prediction_type=self._prediction_type if hasattr(self, '_prediction_type') else 'sample',
-            #         )
-            #         noised_action_normalized = x_t_prev.detach()
-
-            # denoise_outputs = self.forward_denoiser(encoder_outputs, noised_action_normalized,
-            #                                         diffusion_steps.view(B, A))
-            denoise_outputs = self.forward_denoiser(encoder_outputs, noised_anchors_gt,
-                                                    diffusion_steps.view(B, self._agents_len))
+            # Inverse diffusion
+            denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
+                                                    diffusion_steps.view(B, self._agents_len), 
+                                                    best_anchor_diff)
+            # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
+            # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
+            # denoise_outputs['denoised_trajs']: B, A_pred, T_future, 5
+            # denoise_outputs['denoised_trajs_origin']: B, A_pred, T_future, 5
 
             debug_outputs.update(denoise_outputs)
             debug_outputs['noise'] = noise
@@ -535,9 +503,14 @@ class VBD(pl.LightningModule):
 
             elif self._prediction_type == 'error':
                 denoiser_output = denoise_outputs['denoiser_output']
-                denoise_loss = torch.nn.functional.mse_loss(
-                    denoiser_output, noise, reduction='mean'
-                )
+                # denoise_loss = torch.nn.functional.mse_loss(
+                #     denoiser_output, noise, reduction='mean'
+                # )
+                denoise_loss = smooth_l1_loss(denoiser_output, noise, reduction='none')
+
+                agent_mask = agents_interested.unsqueeze(-1).unsqueeze(-1) > 0
+                denoise_loss = denoise_loss * agent_mask
+                denoise_loss = denoise_loss.sum() / (agent_mask.sum() * T_future_steps * D_predict + 1e-6)
                 total_loss += self.denoiser_loss_weight * (self.denoise_loss_weight * denoise_loss)
                 log_dict.update({
                     prefix + 'diffusion_loss': denoise_loss.item(),
@@ -590,6 +563,15 @@ class VBD(pl.LightningModule):
         Returns:
             loss: Loss value.
         """
+        # batch['agents_history']: B, A_all, T_history_and_cur, 8
+        # batch['agents_interested']: B, A_all
+        # batch['agents_future']: B, A_all, T_future_and_cur, 5
+        # batch['agents_type']: B, A_all
+        # batch['traffic_light_points']: B, N_tls, 3
+        # batch['polylines']: B, N_polylines, T_polyline, 5
+        # batch['polylines_valid']: B, N_polylines
+        # batch['relations']: B, A_all + N_tls + N_polylines, A_all + N_tls + N_polylines, 3
+
         global_step = self.global_step
 
         if self.use_gumbel_anneal:
@@ -711,16 +693,16 @@ class VBD(pl.LightningModule):
             self, trajs, trajs_gt, trajs_valid, agents_interested
     ):
         """
-        Calculates the loss for action prediction.
+        Calculates the loss for trajectory prediction.
 
         Args:
-            trajs (torch.Tensor): Tensor of shape [B, A, T, 2] representing predicted trajs.
-            actions_gt (torch.Tensor): Tensor of shape [B, A, T, 2] representing ground truth trajs.
-            actions_valid (torch.Tensor): Tensor of shape [B, A, T] representing validity of trajs.
-            agents_interested (torch.Tensor): Tensor of shape [B, A] representing interest in agents.
+            trajs (torch.Tensor): Tensor of shape [B, A_pred, T_future, 5] representing predicted trajectories.
+            trajs_gt (torch.Tensor): Tensor of shape [B, A_pred, T_future_and_cur, 5] representing ground truth trajectories.
+            trajs_valid (torch.Tensor): Tensor of shape [B, A_pred, T_future_and_cur] representing validity of trajectories.
+            agents_interested (torch.Tensor): Tensor of shape [B, A_pred] representing interest in agents.
 
         Returns:
-            action_loss_mean (torch.Tensor): Mean action loss.
+            trajs_loss_mean (torch.Tensor): Mean trajectory loss.
         """
         # Get Mask
         trajs_mask = trajs_valid[:, :, 1:] * (agents_interested[..., None] > 0)
@@ -744,16 +726,18 @@ class VBD(pl.LightningModule):
         Supports BCE, Plackett-Luce (rank), and a mix of both for the score loss.
 
         Args:
-            trajs (torch.Tensor): Predicted trajectories from GoalPredictor, shape [B, A, Q, T, 3].
-            scores (torch.Tensor): Predicted scores (logits) for anchors, shape [B, A, Q].
-            agents_future (torch.Tensor): Ground truth future agent states, shape [B, A, T, D].
-            agents_future_valid (torch.Tensor): Validity of future states, shape [B, A, T].
-            anchors (torch.Tensor): Anchor trajectories in local frame, shape [B, A, Q, T+1, 2].
-            agents_interested (torch.Tensor): Interest in agents, shape [B, A].
+            trajs (torch.Tensor): Predicted trajectories from GoalPredictor, shape [B, A_pred, Q, T_future, 5].
+            scores (torch.Tensor): Predicted scores (logits) for anchors, shape [B, A_pred, Q].
+            agents_future (torch.Tensor): Ground truth future agent states, shape [B, A_pred, T_future_and_cur, 5].
+            agents_future_valid (torch.Tensor): Validity of future states, shape [B, A_pred, T_future_and_cur].
+            anchors (torch.Tensor): Anchor trajectories in local frame, shape [B, A_pred, Q, T_future_and_cur, 2].
+            agents_interested (torch.Tensor): Interest in agents, shape [B, A_pred].
 
         Returns:
             traj_loss_mean (torch.Tensor): Mean regression loss for the best predicted trajectory.
             score_loss_mean (torch.Tensor): Mean score loss.
+            gt_ranking (torch.Tensor): Ground truth ranking of anchors based on ADE, shape [B * A_pred, Q].
+            ade (torch.Tensor): ADE for each anchor, shape [B * A_pred, Q].
         """
         num_batch, num_agents, num_query, _, _ = trajs.shape
         num_timesteps_future = agents_future.shape[2]
@@ -817,14 +801,16 @@ class VBD(pl.LightningModule):
 
         # --- 3. Calculate regression loss for the best *predicted* trajectory ---
         trajs_pred_flat = trajs.flatten(0, 1)[:, :, :, :2]
-        best_pred_idx = torch.argmax(scores_flat, dim=-1)
-        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
+        best_gt_idx = gt_ranking[:, 0]
+        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_gt_idx]
+        # best_pred_idx = torch.argmax(scores_flat, dim=-1)
+        # trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
         
         traj_loss = smooth_l1_loss(trajs_select[:, :num_timesteps_future-1], trajs_gt, reduction='none').sum(-1)
         traj_loss = traj_loss * flat_traj_mask
         traj_loss_mean = traj_loss.sum() / torch.clamp(flat_traj_mask.sum(), min=1.0)
 
-        return traj_loss_mean, score_loss_mean
+        return traj_loss_mean, score_loss_mean, gt_ranking, ade
 
     def goal_loss_new(
             self, trajs, types, agents_future,

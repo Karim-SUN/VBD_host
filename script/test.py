@@ -20,6 +20,7 @@ jax.config.update('jax_platform_name', 'cpu')
 from vbd.data.dataset import WaymaxTestDataset
 from vbd.model.utils import set_seed
 from vbd.sim_agent.sim_actor import VBDTest, sample_to_action
+from vbd.sim_agent.sim_actor_v2 import VBDTest, sample_to_action
 from vbd.waymax_visualization.plotting import plot_state
 
 # waymax
@@ -59,7 +60,7 @@ env = WaymaxEnvironment(
 
 dataset = WaymaxTestDataset(
     data_dir=None,
-    anchor_path='../vbd/data/cluster_64_center_dict.pkl',
+    anchor_path='vbd/data/cluster_64_center_dict.pkl',
     max_object=N_SIM_AGENTS
 )
 
