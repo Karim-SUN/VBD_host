@@ -229,9 +229,9 @@ class VBD(pl.LightningModule):
         # Roll out
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
         denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
-        final_offset = denoised_offset + anchor_diff
+        final_diff = denoised_offset + anchor_diff
         denoised_trajs, denoised_trajs_origin = roll_out_new(
-            current_states, final_offset, global_frame=True)
+            current_states, final_diff, global_frame=True)
 
         return {
             'denoiser_output': denoiser_output,
@@ -453,7 +453,7 @@ class VBD(pl.LightningModule):
             # Inverse diffusion
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
-                                                    best_pred_anchor_diff)
+                                                    best_anchor_diff)
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_trajs']: B, A_pred, T_future, 5
