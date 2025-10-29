@@ -27,8 +27,7 @@ from waymax.utils import geometry
 from .color import *
 from .utils import *
 
-from .vis_utils import (plot_road_line, plot_road_edge, plot_stop_sign, plot_crosswalk, plot_speed_bump,
-                        plot_traj_with_speed, plot_traj_with_time)
+from .vis_utils import plot_road_line, plot_road_edge, plot_stop_sign, plot_crosswalk, plot_speed_bump, plot_traj_with_speed
 road_type_dict = {
   0:  'RoadLine-Unknown',  # 'Unknown
   1:  'LaneCenter-Freeway',
@@ -177,19 +176,19 @@ def plot_trajectory(
     if time_idx >= num_steps:
       raise ValueError('time_idx is out of range.')
 
-  # # Adds id if needed.
-  # if indices is not None and time_idx is not None:
-  #   for i in range(num_obj):
-  #     if not traj.valid[i, time_idx]:
-  #       continue
-  #     ax.text(
-  #         traj_5dof[i, time_idx, 0] - 2,
-  #         traj_5dof[i, time_idx, 1] + 2,
-  #         f'{indices[i]}',
-  #         zorder=10,
-  #         clip_on=True,
-  #         fontsize = 14,
-  #     )
+  # Adds id if needed.
+  if indices is not None and time_idx is not None:
+    for i in range(num_obj):
+      if not traj.valid[i, time_idx]:
+        continue
+      ax.text(
+          traj_5dof[i, time_idx, 0] - 2,
+          traj_5dof[i, time_idx, 1] + 2,
+          f'{indices[i]}',
+          zorder=10,
+          clip_on=True,
+          fontsize = 14,
+      )
 
   _plot_bounding_boxes(ax, traj_5dof, time_idx, is_controlled, traj.valid, is_ego, is_adv)  # pytype: disable=wrong-arg-types  # jax-ndarray
 
@@ -215,18 +214,7 @@ def plot_trajectory(
       v_max = 20, #np.ceil(valid_speed.max()),
       show_colorbar=show_colorbar
   )
-
-  # # Plot future of controlled agents
-  # if is_ego is not None:
-  #   ego_traj = traj.pred_trajs[is_ego, :, :2]
-  #   ego_traj = np.pad(ego_traj, ((0, 0), (0, 0), (0, 1)), mode='constant', constant_values=1)
-  #   plot_traj_with_time(
-  #     obj_type_list = ['TYPE_VEHICLE'],
-  #     trajs = ego_traj,
-  #     timestamps_seconds=np.arange(traj.shape[-1] - time_idx).tolist(),
-  #     ax=ax
-  #   )
-
+  
 def plot_traffic_light_signals_as_points(
     ax: matplotlib.axes.Axes,
     tls: datatypes.TrafficLights,
