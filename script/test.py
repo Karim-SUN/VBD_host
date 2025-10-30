@@ -19,7 +19,7 @@ jax.config.update('jax_platform_name', 'cpu')
 # utils
 from vbd.data.dataset import WaymaxTestDataset
 from vbd.model.utils import set_seed
-from vbd.sim_agent.sim_actor import VBDTest, sample_to_action
+# from vbd.sim_agent.sim_actor import VBDTest, sample_to_action
 from vbd.sim_agent.sim_actor_v2 import VBDTest, sample_to_action
 from vbd.waymax_visualization.plotting import plot_state
 
@@ -39,7 +39,7 @@ from vbd.data.waymax_utils import create_iter
 
 ## Parameters
 CURRENT_TIME_INDEX = 10
-N_SIM_AGENTS = 32
+N_SIM_AGENTS = 8
 N_SIMULATION_STEPS = 80
 
 
@@ -131,7 +131,7 @@ def run_simulation(args):
                         'log_divergence', 'kinematic_infeasibility'])
 
     # Begin simulation
-    for scenario_id, scenario in data_iter:  
+    for scenario_id, scenario in tqdm(data_iter):  
         print(f"Running scenario {scenario_id}...")
         initial_state = current_state = env.reset(scenario)
         log_states = [initial_state]
@@ -156,10 +156,12 @@ def run_simulation(args):
 
                     elif args.test_mode == 'prior':
                         pred = vbd.inference_predictor(batch)
-                        scores = pred['goal_scores'][0].softmax(dim=-1)
+                        # scores = pred['goal_scores'][0].softmax(dim=-1)
+                        goal_idx = pred['goal_scores'][0].argmax(-1)
                         trajs = pred['goal_trajs'][0]
-                        sampled_idx = torch.multinomial(scores, 1).squeeze()
-                        pred_traj = trajs[torch.arange(sampled_idx.shape[0]), sampled_idx].cpu().numpy()
+                        # sampled_idx = torch.multinomial(scores, 1).squeeze()
+                        # pred_traj = trajs[torch.arange(sampled_idx.shape[0]), sampled_idx].cpu().numpy()
+                        pred_traj = trajs[torch.arange(goal_idx.shape[0]), goal_idx].cpu().numpy()
 
                     else:
                         raise NotImplementedError
@@ -213,7 +215,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_path', type=str, default=None)
     parser.add_argument('--model_path', type=str, default=None)
     parser.add_argument('--replan', type=int, default=10, help='Replan frequency')
-    parser.add_argument('--test_mode', type=str, default='diffusion')
+    parser.add_argument('--test_mode', type=str, default='prior')
     parser.add_argument('--save_simulation', action='store_true')
 
     args = parser.parse_args()

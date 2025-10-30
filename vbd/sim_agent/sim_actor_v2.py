@@ -16,7 +16,7 @@ class VBDTest(VBD):
     def __init__(self, 
         cfg: dict,
         early_stop: int = 0,
-        skip: int = 1,
+        skip: int = 10,
         reward_func: nn.Module = None,
         guidance_iter: int = 5,
         guidance_end: int = 1,
@@ -92,11 +92,24 @@ class VBDTest(VBD):
         
         batch = self.batch_to_device(batch, self.device)
         # data inputs
-        agents_future = batch['agents_future'][:, :self._agents_len]
-        B, A, T_future, D0 = agents_future.shape
-        T = T_future // self._action_len
-        D = 2
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, A, -1, -1, -1)
+        agents_future = batch['agents_future']
+        B, A_all, T_future_and_cur, D_all = agents_future.shape
+        T_future_steps = T_future_and_cur // self._action_len
+        D_predict = 2
+        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
+
+        agents_future_valid = torch.ne(agents_future.sum(-1), 0)
+        agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
+            agents_future_valid) & agents_future_valid # B, A_all, T_future_and_cur
+        agents_interested = batch['agents_interested']
+        anchors = batch['anchors']
+
+        agents_history = batch['agents_history']
+        agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[..., :5]), dim=-2)
+        batch['agents_features'] = agents_features # B, A_all, T_history_and_cur + T_future_and_cur - 1, 5
+        T_history_and_cur = agents_history.shape[-2]
+        batch['T_history_and_cur'] = T_history_and_cur
+        batch['T_history_and_cur'] = agents_history.shape[-2]
 
         encoder_outputs = self.encoder(batch)
         goal_outputs = self.forward_predictor(encoder_outputs)
@@ -483,7 +496,7 @@ class VBDTest(VBD):
         return denoiser_output, x_t_prev, guide_history
     
     ################### Denoising ###################
-    def step_denoiser(self, x_t: torch.Tensor, c: dict, t: int):
+    def step_denoiser(self, x_t: torch.Tensor, c: dict, t: int, anchor_diff: torch.Tensor):
         """
         Perform a denoising step to sample x_{t-1} ~ P[x_{t-1} | x_t, D(x_t, c, t)].
         
@@ -503,8 +516,9 @@ class VBDTest(VBD):
         # Denoise to reconstruct x_0 ~ D(x_t, c, t)
         denoiser_output = self.forward_denoiser(
             encoder_outputs=c,
-            noised_anchors_gt=x_t,
+            noised_inputs=x_t,
             diffusion_step=t,
+            anchor_diff=anchor_diff
         )
             
         x_0 = denoiser_output['denoiser_output']
@@ -586,15 +600,12 @@ class VBDTest(VBD):
         # goal_index[batch_index_mask] = random_index[batch_index_mask]
 
         target_anchors_gt = anchors[B_idx, A_idx, goal_index, :, :]  # 索引数据
-        anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # 计算相邻锚点的差值
-
-        anchors_input = self.normalize_anchor_increments(anchors_input)
-
+        pred_anchor_diff = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # 计算相邻锚点的差值
 
         # Calc Noise
         diffusion_steps = torch.full(
             size=(B, self._agents_len, 1, 1),
-            fill_value=self.noise_scheduler.num_steps * 1 // 50,
+            fill_value=self.noise_scheduler.num_steps * 1 // 100,
             device=agents_future.device,
             dtype=torch.long
         )
@@ -607,14 +618,11 @@ class VBDTest(VBD):
         noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
         x_t = self.noise_scheduler.add_noise(
-            anchors_input,  # .reshape(B*A, T, D),
+            torch.zeros_like(pred_anchor_diff).type_as(pred_anchor_diff),  # .reshape(B*A, T, D),
             noise,
             diffusion_steps  # , .reshape(B*A),
         )
-        x_t = torch.clamp(x_t, min=-1, max=1)
-        x_t = self.unnormalize_anchor_increments(x_t)
-
-
+        # x_t = torch.clamp(x_t, min=-1, max=1)
         
         if num_samples > 1:
             encoder_outputs = duplicate_batch(encoder_outputs, num_samples)
@@ -625,7 +633,7 @@ class VBDTest(VBD):
         action_dim = 2
         
         # diffusion_steps = list(reversed(range(self.early_stop, self.noise_scheduler.num_steps * 1 // 10, self.skip)))
-        diffusion_steps = list(reversed(range(10, self.noise_scheduler.num_steps * 1 // 50 + 1, self.skip)))
+        diffusion_steps = list(reversed(range(0, self.noise_scheduler.num_steps * 1 // 100 + 1, self.skip)))
 
         # History
         x_t_history = []
@@ -650,12 +658,13 @@ class VBDTest(VBD):
                 )
                 guide_history.append(guide)
             else:
-                if t == 1:
+                if t <= 1:
                     pass
                 denoiser_outputs, x_t = self.step_denoiser(
                     x_t = x_t, 
                     c = encoder_outputs, 
                     t = fix_t if fix_t >= 0 else t,
+                    anchor_diff = pred_anchor_diff,
                 )
                 guide = None
 

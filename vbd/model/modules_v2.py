@@ -36,7 +36,7 @@ class Encoder(nn.Module):
         T_history_and_cur = inputs['T_history_and_cur']
         # x, y, yaw, vx, vy
         agents_interested = inputs['agents_interested'][:, :A_all]
-        agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur)
+        agents_local = inputs['agents_local']
 
         # --- State Dropout: 按时间戳随机丢弃历史状态 ---
         if self.training and self.history_dropout > 0:

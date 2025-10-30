@@ -312,6 +312,9 @@ class VBD(pl.LightningModule):
         batch['T_history_and_cur'] = T_history_and_cur
         batch['T_history_and_cur'] = agents_history.shape[-2]
 
+        agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur - 1)
+        batch['agents_local'] = agents_local
+
         log_dict = {}
         debug_outputs = {}
         total_loss = 0
@@ -371,12 +374,10 @@ class VBD(pl.LightningModule):
             B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
             A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A_pred] 的车辆索引
 
-            # B, A_all, T_history_and_cur + T_future_and_cur - 1, 5
-            agents_local = batch_transform_trajs_to_local_frame(agents_features, ref_idx=T_history_and_cur - 1)
             # B, A_pred, T_future_and_cur, 2
             gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :2]
 
-            valid_sparse = agents_future_valid[:, :self._agents_len, ::2]  # B, A_pred, T_future_steps
+            valid_sparse = agents_future_valid[:, :, ::2]  # B, A_pred, T_future_steps
             diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, 40]
             diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, 40, 1] 以便广播
 
@@ -387,19 +388,21 @@ class VBD(pl.LightningModule):
             # Use best matched anchor to train
             best_anchor_idx = gt_ranking[:, 0].view(B, self._agents_len)  # B, A_pred
 
-            all_anchor_diff = torch.diff(anchors[:, :, :, ::2, :], dim=-2)  # B, A_pred, Q, T_future_steps, 2
-
-            best_anchor_diff = all_anchor_diff[
+            # Select the best anchor trajectory first
+            best_anchors = anchors[
                 B_idx, A_idx, best_anchor_idx
-            ]  # B, A_pred, T_future_steps, 2
+            ]  # B, A_pred, T_future_and_cur, 2
+
+            # Then calculate the difference
+            best_anchor_diff = torch.diff(best_anchors[:, :, ::2, :], dim=-2)  # B, A_pred, T_future_steps, 2
             target_offset = gt_future_diff - best_anchor_diff  # B, A_pred, T_future_steps, 2
             target_offset = target_offset * diff_valid_mask.float()
 
             # Predicted anchor
-            best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
-            best_pred_anchor_diff = all_anchor_diff[
-                B_idx, A_idx, best_pred_anchor_idx
-            ]  # B, A_pred, T_future_steps, 2
+            # best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
+            # best_pred_anchor_diff = all_anchor_diff[
+            #     B_idx, A_idx, best_pred_anchor_idx
+            # ]  # B, A_pred, T_future_steps, 2
 
             # # Use Gumbel-Softmax for differentiable sampling of anchors
             # goal_one_hot = gumbel_softmax(goal_scores, tau=self._gumbel_tau, hard=True, dim=-1)

@@ -31,7 +31,7 @@ def plot_state(
     indices = np.arange(traj.num_objects)
     is_controlled = current_state.object_metadata.is_controlled
 
-    is_ego = np.where(current_state.object_metadata.is_sdc)[0]
+    # is_ego = np.where(current_state.object_metadata.is_sdc)[0]
 
     visualization.plot_trajectory(
         ax, traj, is_controlled, time_idx=current_state.timestep,
