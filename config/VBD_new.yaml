@@ -19,10 +19,10 @@ init_from: null
 agents_len: 16
 future_len: 80
 action_len: 2
-encoder_layers: 4
+encoder_layers: 6
 
 # Encoder
-history_dropout: 0.2
+history_dropout: 0.4
 
 # Task Probabilities for get_random_mask
 task_probabilities:
@@ -60,13 +60,13 @@ anchor_incre_max: [7, 2]
 seed: 21
 batch_size: 10
 num_workers: 32
-accumulate_grad_batches: 1 # 会影响实际的lr steps等
-lr: 0.00018 # 0.0002
+accumulate_grad_batches: 2 # 会影响实际的lr steps等
+lr: 0.0002 # 0.0002
 weight_decay: 0.01
-epochs: 6
-lr_warmup_step: 5000
-lr_total_steps: 58452 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
-lr_end_factor: 0.03 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
+epochs: 10
+lr_warmup_step: 8000
+lr_total_steps: 97420 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
+lr_end_factor: 0.05 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
 random_target: 0.1
 
@@ -84,13 +84,13 @@ soft_hinge_loss_weight: 0.1
 
 bce_loss_weight: 1.0
 goal_loss_weight: 0.8
-score_loss_weight: 0.2
+score_loss_weight: 0.5
 predictor_loss_weight: 1.0
 
-traj_loss_weight: 0.4
+traj_loss_weight: 0.8
 denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 
 train_encoder: True
-train_denoiser: False
+train_denoiser: True
 train_predictor: True

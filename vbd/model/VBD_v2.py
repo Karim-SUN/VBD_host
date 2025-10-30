@@ -446,7 +446,7 @@ class VBD(pl.LightningModule):
                 noise,
                 diffusion_steps
             )
-            # noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
+            noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
 
             # noised_target_offset = self.unnormalize_anchor_increments(noised_target_offset_norm) # B, A_pred, T_future_steps, 2
 
