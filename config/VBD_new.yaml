@@ -21,8 +21,8 @@ init_from: null
 
 # Model Config
 agents_len: 16
-future_len: 80
-action_len: 2
+future_len: 40
+action_len: 1
 encoder_layers: 6
 
 # Encoder

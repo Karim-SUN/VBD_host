@@ -228,7 +228,8 @@ class VBD(pl.LightningModule):
         denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
         final_diff = denoised_offset + anchor_diff
         denoised_trajs, denoised_trajs_origin = roll_out_new(
-            current_states, final_diff, global_frame=True)
+            current_states, final_diff, global_frame=True, action_len=self._action_len
+        )
 
         return {
             'denoiser_output': denoiser_output,
@@ -287,6 +288,8 @@ class VBD(pl.LightningModule):
         """
         # data inputs
         agents_future = batch['agents_future']
+        agents_future = agents_future[:, :, :self._future_len + 1, :]
+        batch['agents_future'] = agents_future
         B, A_all, T_future_and_cur, D_all = agents_future.shape
         T_future_steps = T_future_and_cur // self._action_len
         D_predict = 2
@@ -378,12 +381,12 @@ class VBD(pl.LightningModule):
             # B, A_pred, T_future_and_cur, 2
             gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :2]
 
-            valid_sparse = agents_future_valid[:, :, ::2]  # B, A_pred, T_future_steps
-            diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, 40]
-            diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, 40, 1] 以便广播
+            valid_sparse = agents_future_valid[:, :, ::self._action_len]  # B, A_pred, T_future_steps
+            diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, T_future_steps]
+            diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, T_future_steps, 1] 以便广播
 
             # B, A_pred, T_future_steps, 2
-            gt_future_diff = torch.diff(gt_future_local[:, :, ::2, :], dim=-2)
+            gt_future_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
             gt_future_diff = gt_future_diff * diff_valid_mask.float()
 
             # Use best matched anchor to train
@@ -395,7 +398,7 @@ class VBD(pl.LightningModule):
             ]  # B, A_pred, T_future_and_cur, 2
 
             # Then calculate the difference
-            best_anchor_diff = torch.diff(best_anchors[:, :, ::2, :], dim=-2)  # B, A_pred, T_future_steps, 2
+            best_anchor_diff = torch.diff(best_anchors[:, :, ::self._action_len, :], dim=-2)  # B, A_pred, T_future_steps, 2
             target_offset = gt_future_diff - best_anchor_diff  # B, A_pred, T_future_steps, 2
             target_offset = target_offset * diff_valid_mask.float()
 

@@ -239,20 +239,22 @@ def roll_out(
 
 
 def roll_out_new(
-        current_states: torch.Tensor,
-        traj_increments: torch.Tensor,
-        global_frame: float = True
+    current_states: torch.Tensor,
+    traj_increments: torch.Tensor,
+    global_frame: float = True,
+    action_len: int = 5
 ):
     """
     Forward pass of the dynamics model.
 
     Args:
-        current_states (torch.Tensor): Current states tensor of shape [B, N, x, 5]. [x, y, theta, v_x, v_y]
-        traj_increments (torch.Tensor): Inputs tensor of shape [B, N, x, T_f//T_a, 2]. [delta_x, delta_y]
-        global_frame (bool): Flag indicating whether to use the global frame of reference. Default is False.
+    current_states (torch.Tensor): Current states tensor of shape [B, N, x, 5]. [x, y, theta, v_x, v_y]
+    traj_increments (torch.Tensor): Inputs tensor of shape [B, N, x, T_f//T_a, 2]. [delta_x, delta_y]
+    global_frame (bool): Flag indicating whether to use the global frame of reference. Default is False.
+    action_len (int): Length of each action increment.
 
     Returns:
-        torch.Tensor: Predicted trajectories.
+    torch.Tensor: Predicted trajectories.
 
     """
     x0 = current_states[..., 0]
@@ -262,38 +264,37 @@ def roll_out_new(
     vy0 = current_states[..., 4]
 
     B, N, T, D = traj_increments.shape
+    
+    # Repeat increments to match the desired rollout length
+    traj_increments_expanded = traj_increments.repeat_interleave(action_len, dim=-2)
+    
+    # Calculate cumulative sum for the trajectory points
+    traj_cumsum = torch.cumsum(traj_increments_expanded, dim=-2)
+    
+    # The original trajectory is now the one with cumulative sums
+    x_origin = traj_cumsum[..., 0]
+    y_origin = traj_cumsum[..., 1]
 
-    traj_cumsum = torch.cumsum(traj_increments, dim=-2)
-    interpolcated_traj_cumsum = torch.zeros(B, N, T * 2, D, device=traj_increments.device)
-    interpolcated_traj_cumsum[:, :, ::2] = traj_cumsum
-    interpolcated_traj_cumsum[:, :, 1:-1:2] = (traj_cumsum[:, :, 1:] + traj_cumsum[:, :, :-1]) / 2
-    interpolcated_traj_cumsum[:, :, -1] = 2 * traj_cumsum[:, :, -2] - traj_cumsum[:, :, -3]
+    # For now, theta, vx, vy are placeholders. This might need a more sophisticated calculation.
+    T_origin = traj_cumsum.shape[-2]
+    theta_origin = torch.zeros(B, N, T_origin, device=traj_increments.device)
+    vx_origin = torch.zeros(B, N, T_origin, device=traj_increments.device)
+    vy_origin = torch.zeros(B, N, T_origin, device=traj_increments.device)
 
     if global_frame:
-        x = x0.unsqueeze(-1) + interpolcated_traj_cumsum[..., 0]
-        y = y0.unsqueeze(-1) + interpolcated_traj_cumsum[..., 1]
-        theta = theta0.unsqueeze(-1) + torch.zeros(B, N, T * 2, device=traj_increments.device)
-        vx = vx0.unsqueeze(-1) + torch.zeros(B, N, T * 2, device=traj_increments.device)
-        vy = vy0.unsqueeze(-1) + torch.zeros(B, N, T * 2, device=traj_increments.device)
-        x_origin = x0.unsqueeze(-1) + traj_cumsum[..., 0]
-        y_origin = y0.unsqueeze(-1) + traj_cumsum[..., 1]
-        theta_origin = theta0.unsqueeze(-1) + torch.zeros(B, N, T, device=traj_increments.device)
-        vx_origin = vx0.unsqueeze(-1) + torch.zeros(B, N, T, device=traj_increments.device)
-        vy_origin = vy0.unsqueeze(-1) + torch.zeros(B, N, T, device=traj_increments.device)
-    else:
-        x = interpolcated_traj_cumsum[..., 0]
-        y = interpolcated_traj_cumsum[..., 1]
-        theta = torch.zeros(B, N, T * 2, device=traj_increments.device)
-        vx = torch.zeros(B, N, T * 2, device=traj_increments.device)
-        vy = torch.zeros(B, N, T * 2, device=traj_increments.device)
-        x_origin = traj_cumsum[..., 0]
-        y_origin = traj_cumsum[..., 1]
-        theta_origin = torch.zeros(B, N, T, device=traj_increments.device)
-        vx_origin = torch.zeros(B, N, T, device=traj_increments.device)
-        vy_origin = torch.zeros(B, N, T, device=traj_increments.device)
+        x_origin = x0.unsqueeze(-1) + x_origin
+        y_origin = y0.unsqueeze(-1) + y_origin
+        theta_origin = theta0.unsqueeze(-1) + theta_origin
+        vx_origin = vx0.unsqueeze(-1) + vx_origin
+        vy_origin = vy0.unsqueeze(-1) + vy_origin
 
-    return (torch.stack([x, y, theta, vx, vy], dim=-1),
-            torch.stack([x_origin, y_origin, theta_origin, vx_origin, vy_origin], dim=-1))
+    # The interpolated trajectory is just the original trajectory in this version
+    # as interpolation logic is removed for simplification with action_len.
+    # You can add interpolation logic here if needed.
+    interpolated_traj = torch.stack([x_origin, y_origin, theta_origin, vx_origin, vy_origin], dim=-1)
+    original_traj = torch.stack([x_origin, y_origin, theta_origin, vx_origin, vy_origin], dim=-1)
+
+    return interpolated_traj, original_traj
 
 
 # def roll_out_new(
