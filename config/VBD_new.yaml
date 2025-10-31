@@ -7,7 +7,7 @@ model_name: VBD
 # log_dir: ./train_log
 train_data_path: /home/karim/VBD/data/train
 val_data_path: /home/karim/VBD/data/val
-anchor_path: vbd/data/cluster_64_center_dict.pkl
+anchor_path: vbd/data/kmeans_navsim_traj_20.npy
 log_dir: ./train_log
 
 # Wandb Config

@@ -22,10 +22,10 @@ class WaymaxDataset(Dataset):
     def __init__(
         self,
         data_dir,
-        anchor_path = "/home/karim/VBD_host/vbd/data/cluster_64_center_dict.pkl",
+        anchor_path = "vbd/data/kmeans_navsim_traj_20.npy",
     ):
         self.data_list = glob.glob(data_dir+'/*') if data_dir is not None else []
-        self.anchors = pickle.load(open(anchor_path, "rb"))
+        self.anchors = np.load(anchor_path)
         
         self.__collate_fn__ = data_collate_fn
 
@@ -42,19 +42,7 @@ class WaymaxDataset(Dataset):
         Returns:
             numpy.ndarray: Array of anchor vectors.
         """
-        anchors = []
-
-        for i in range(len(types)):
-            if types[i] == 1:
-                anchors.append(self.anchors['TYPE_VEHICLE'])
-            elif types[i] == 2:
-                anchors.append(self.anchors['TYPE_PEDESTRIAN'])
-            elif types[i] == 3:
-                anchors.append(self.anchors['TYPE_CYCLIST'])
-            else:
-                anchors.append(np.zeros_like(self.anchors['TYPE_VEHICLE']))
-
-        return np.array(anchors, dtype=np.float32)
+        return np.array(self.anchors, dtype=np.float32)
     
     def gen_tensor(self, data):
         """

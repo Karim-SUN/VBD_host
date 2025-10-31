@@ -84,9 +84,6 @@ class VBD(pl.LightningModule):
 
         self.batch_size = cfg['batch_size']
         self.accumulate_grad_batches = cfg.get('accumulate_grad_batches', 1)
-        self.anchor = np.load('vbd/data/kmeans_navsim_traj_20.npy')
-        self.anchor = interpolate_anchors(self.anchor, self._future_len + 1)
-        self.anchor_tensor = torch.tensor(self.anchor, dtype=torch.float32).to('cuda')
 
         self.encoder = Encoder(
             self._encoder_layers,
@@ -293,6 +290,10 @@ class VBD(pl.LightningModule):
         B, A_all, T_future_and_cur, D_all = agents_future.shape
         T_future_steps = T_future_and_cur // self._action_len
         D_predict = 2
+
+        anchors = batch['anchors'][0].cpu().numpy()
+        anchors = interpolate_anchors(anchors, self._future_len + 1)
+        self.anchor_tensor = torch.tensor(anchors, dtype=torch.float32).to('cuda')
         # batch['anchors']: B, A_pred, Q, T_future_and_cur, D_predict
         batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
 
