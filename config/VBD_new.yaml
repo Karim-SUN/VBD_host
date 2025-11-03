@@ -7,7 +7,8 @@ model_name: VBD
 # log_dir: ./train_log
 train_data_path: /home/karim/VBD/data/train
 val_data_path: /home/karim/VBD/data/val
-anchor_path: vbd/data/kmeans_navsim_traj_20.npy
+anchor_path: vbd/data/16384.npy
+cluster_path: vbd/data/clusters_nms.pkl
 log_dir: ./train_log
 
 # Wandb Config
@@ -29,6 +30,7 @@ encoder_layers: 6
 history_dropout: 0.2
 
 # Task Probabilities for get_random_mask
+intent_dropout: 0.25
 task_probabilities:
   prediction: 0.8
   goal_conditioned: 0.08

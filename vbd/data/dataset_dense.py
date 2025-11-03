@@ -22,27 +22,13 @@ class WaymaxDataset(Dataset):
     def __init__(
         self,
         data_dir,
-        anchor_path = "vbd/data/8192.npy",
     ):
         self.data_list = glob.glob(data_dir+'/*') if data_dir is not None else []
-        self.anchors = np.load(anchor_path)
         
         self.__collate_fn__ = data_collate_fn
 
     def __len__(self):
         return len(self.data_list)
-    
-    def _process(self, types):
-        """
-        Process the agent types and convert them into anchor vectors.
-
-        Args:
-            types (numpy.ndarray): Array of agent types.
-
-        Returns:
-            numpy.ndarray: Array of anchor vectors.
-        """
-        return np.array(self.anchors, dtype=np.float32)
     
     def gen_tensor(self, data):
         """
@@ -63,7 +49,6 @@ class WaymaxDataset(Dataset):
         polylines = data['polylines']
         polylines_valid = data['polylines_valid']
         relations = data['relations']
-        anchors = self._process(agents_type)
 
         agents_current = np.expand_dims(agents_history[:, -1, :], axis=1)
         T_history = agents_history.shape[1]
@@ -80,7 +65,6 @@ class WaymaxDataset(Dataset):
             "polylines": torch.from_numpy(polylines),
             "polylines_valid": torch.from_numpy(polylines_valid),
             "relations": torch.from_numpy(relations),
-            "anchors": torch.from_numpy(anchors)
         }
         
         return tensors
@@ -150,8 +134,6 @@ class WaymaxTestDataset(WaymaxDataset):
             remove_history=remove_history,
         )
         
-        data_dict['anchors'] = self._process(data_dict['agents_type'])
-
         return data_dict
         
     def reset_agent_length(self,max_object):
