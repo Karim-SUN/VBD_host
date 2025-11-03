@@ -340,19 +340,12 @@ class VBD(pl.LightningModule):
         T_future_steps = T_future_and_cur // self._action_len
         D_predict = 2
 
-        anchors = batch['anchors'][0].cpu().numpy()
-        anchors = interpolate_anchors(anchors, self._future_len + 1)
-        self.anchor_tensor = torch.tensor(anchors, dtype=torch.float32).to('cuda')
-        # batch['anchors']: B, A_pred, Q, T_future_and_cur, D_predict
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
-
         # TODO: Investigate why this to NAN
         # agents_future_valid = batch['agents_future_valid'][:, :self._agents_len]
         agents_future_valid = torch.ne(agents_future.sum(-1), 0)
         agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
             agents_future_valid) & agents_future_valid # B, A_all, T_future_and_cur
         agents_interested = batch['agents_interested']
-        anchors = batch['anchors']
         
         # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
         agents_history = batch['agents_history']
@@ -368,8 +361,6 @@ class VBD(pl.LightningModule):
         log_dict = {}
         debug_outputs = {}
         total_loss = 0
-
-        goal_scores = None
 
 
         ############## Run Encoder ##############
@@ -393,11 +384,19 @@ class VBD(pl.LightningModule):
 
         # B, A_pred, T_future_steps, 2
         gt_future_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
-        gt_future_diff = gt_future_diff * diff_valid_mask.float()
-        gt_future_diff_flat = gt_future_diff.reshape(B * self._agents_len, -1)
 
-        dists = torch.cdist(gt_future_diff_flat, self.anchor_diffs_flat) # [B*A, 16384]
-        nearest_fine_anchor_indices = torch.argmin(dists, dim=1)
+        gt_masked = gt_future_diff.unsqueeze(2) * diff_valid_mask.unsqueeze(2)
+        anchor_masked = self.anchor_diffs.unsqueeze(0).unsqueeze(0) * diff_valid_mask.unsqueeze(2)
+        masked_diff = gt_masked - anchor_masked  # [B, A_pred, N, T_future_steps, 2]
+        distances_sq = torch.sum(masked_diff**2, dim=[-1, -2]) # [B, A, 16384]
+
+        nearest_fine_anchor_indices = torch.argmin(distances_sq, dim=2) # [B, A]
+
+        # gt_future_diff = gt_future_diff * diff_valid_mask.float()
+        # gt_future_diff_flat = gt_future_diff.reshape(B * self._agents_len, -1)
+
+        # dists = torch.cdist(gt_future_diff_flat, self.anchor_diffs_flat) # [B*A, 16384]
+        # nearest_fine_anchor_indices = torch.argmin(dists, dim=1)
 
         best_anchor_diff = self.anchor_diffs[nearest_fine_anchor_indices]  # B, A_pred, T_future_steps, 2
         target_cluster_indices = self.cluster_labels[nearest_fine_anchor_indices]
@@ -408,6 +407,7 @@ class VBD(pl.LightningModule):
 
         target_anchor_to_gt_diff_offset = target_anchor_to_gt_diff_offset * diff_valid_mask.float()
         target_cluster_to_gt_diff_offset = target_cluster_to_gt_diff_offset * diff_valid_mask.float()
+
 
         ############### Behavior Prior Prediction #################
         if self._train_predictor:
