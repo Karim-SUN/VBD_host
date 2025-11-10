@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import bitsandbytes.optim as bnb_optim
 import lightning.pytorch as pl
-from .modules_v2 import Encoder, Denoiser, GoalPredictor
+from .modules_offset import Encoder, Denoiser, IntentConditioner
 from .utils import DDPM_Sampler
 from .model_utils_new import (inverse_kinematics, roll_out, 
                               batch_transform_trajs_to_global_frame,
@@ -10,6 +10,8 @@ from .model_utils_new import (inverse_kinematics, roll_out,
                               get_trajectory_type, interpolate_anchors, roll_out_new)
 from torch.nn.functional import smooth_l1_loss, cross_entropy, gumbel_softmax, binary_cross_entropy_with_logits
 import math
+import pickle
+import faiss
 
 
 class VBD(pl.LightningModule):
@@ -44,6 +46,7 @@ class VBD(pl.LightningModule):
         self._action_mean = cfg['action_mean']
         self._action_std = cfg['action_std']
         self._random_target = cfg.get('random_target', 0.1)
+        self._intent_dropout = cfg.get('intent_dropout', 0.0)
         self._task_probabilities = cfg.get('task_probabilities', None)
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
@@ -85,6 +88,10 @@ class VBD(pl.LightningModule):
         self.batch_size = cfg['batch_size']
         self.accumulate_grad_batches = cfg.get('accumulate_grad_batches', 1)
 
+        self.anchor_path = cfg.get('anchor_path')
+        self.cluster_path = cfg.get('cluster_path')
+        self.process_anchors()
+
         self.encoder = Encoder(
             self._encoder_layers,
             version=self._encoder_version,
@@ -100,10 +107,11 @@ class VBD(pl.LightningModule):
             input_dim=self._embeding_dim,
         )
         if self._with_predictor:
-            self.predictor = GoalPredictor(
+            self.predictor = IntentConditioner(
                 future_len=self._future_len,
                 agents_len=self._agents_len,
                 action_len=self._action_len,
+                num_clusters=self.num_clusters,
             )
         else:
             self.predictor = None
@@ -144,7 +152,7 @@ class VBD(pl.LightningModule):
 
         assert len(params_to_update) > 0, 'No parameters to update'
 
-        optimizer = torch.optim.AdamW(  # 使用 8-bit 版本
+        optimizer = bnb_optim.AdamW8bit(  # 使用 8-bit 版本
             params_to_update,
             lr=self.cfg['lr'],
             weight_decay=self.cfg['weight_decay']
@@ -169,6 +177,48 @@ class VBD(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+    
+    def process_anchors(self):
+        """
+        Process anchors for the model.
+        """
+        print(f"Loading anchors from {self.anchor_path}...")
+        anchors_traj = np.load(self.anchor_path)  # [N, 40, 3]
+        zeros_to_prepend = np.zeros((anchors_traj.shape[0], 1, anchors_traj.shape[-1]), dtype=anchors_traj.dtype)
+        anchors_traj = np.concatenate([zeros_to_prepend, anchors_traj], axis=1)
+        anchors_xy = anchors_traj[..., :2]  # [N, 41, 2]
+        anchors_fine_grained_diffs = np.diff(anchors_xy, axis=1).astype(np.float32)  # [N, 40, 2]
+
+        self.num_anchors, self.num_diff_steps, self.diff_dim = anchors_fine_grained_diffs.shape
+
+        anchor_diffs_flat = anchors_fine_grained_diffs.reshape(
+            self.num_anchors, -1
+        ).astype(np.float32)
+        D_dim = anchor_diffs_flat.shape[1] # 80
+
+        print(f"Building Faiss index (N={self.num_anchors}, D={D_dim})...")
+        self.faiss_index = faiss.IndexFlatL2(D_dim) #
+        self.faiss_index.add(anchor_diffs_flat) #
+        print("Faiss index built.")
+
+        print(f"Loading cluster data from {self.cluster_path}...")
+        with open(self.cluster_path, 'rb') as f:
+            cluster_data = pickle.load(f) #
+            
+        cluster_labels = cluster_data['labels'].astype(np.int64)
+
+        cluster_center_diffs = cluster_data['cluster_centers_diffs'].astype(np.float32) # [K, 40, 2]
+        zeros_to_prepend = np.zeros((cluster_center_diffs.shape[0], 1, cluster_center_diffs.shape[-1]), dtype=cluster_center_diffs.dtype)
+        cluster_center_diffs = np.concatenate([zeros_to_prepend, cluster_center_diffs], axis=1)
+
+        self.num_clusters = cluster_data['num_clusters']
+        print(f"Loaded {self.num_clusters} clusters.")
+
+        self.register_buffer('anchor_diffs', torch.from_numpy(anchors_fine_grained_diffs).cuda())
+        self.register_buffer('cluster_diffs', torch.from_numpy(cluster_center_diffs).cuda())
+        self.register_buffer('anchor_diffs_flat', torch.from_numpy(anchor_diffs_flat).cuda())
+        self.register_buffer('cluster_labels', torch.from_numpy(cluster_labels).cuda())
+
 
     def forward(self, inputs, noised_actions_normalized, diffusion_step):
         """
@@ -238,9 +288,9 @@ class VBD(pl.LightningModule):
             'denoised_trajs_origin': denoised_trajs_origin,
         }
 
-    def forward_predictor(self, encoder_outputs):
+    def forward_conditioner(self, encoder_outputs, intent_command, target_cluster_center_diffs):
         """
-        Forward pass of the predictor module.
+        Forward pass of the conditioner module.
 
         Args:
             encoder_outputs: Outputs from the encoder module.
@@ -248,9 +298,8 @@ class VBD(pl.LightningModule):
         Returns:
             predictor_outputs: Dictionary containing the predictor outputs.
         """
-        # Predict goal
-        goal_actions_normalized, goal_scores = self.predictor(encoder_outputs)
-        # goal_actions_normalized, goal_types = self.predictor(encoder_outputs)
+        # Predict offset
+        pred_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command)
 
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
@@ -258,18 +307,15 @@ class VBD(pl.LightningModule):
         assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
-        goal_actions = self.unnormalize_actions(goal_actions_normalized)
-        # goal_trajs = roll_out(current_states[:, :, None, :], goal_actions,
-        #             action_len=self.predictor._action_len, global_frame=True)
-        goal_trajs = roll_out(current_states[:, :, None, :], goal_actions,
-                              action_len=self.predictor._action_len, global_frame=True)
+        coarse_diffs = pred_offsets + target_cluster_center_diffs
+        coarse_trajs, _ = roll_out_new(
+            current_states, coarse_diffs, global_frame=True, action_len=self._action_len
+        )
 
         return {
-            'goal_actions_normalized': goal_actions_normalized,
-            'goal_actions': goal_actions,
-            'goal_scores': goal_scores,
-            # 'goal_types': goal_types,
-            'goal_trajs': goal_trajs,
+            'pred_offsets': pred_offsets,
+            'coarse_trajs': coarse_trajs,
+            'cluster_scores': cluster_scores,
         }
 
     def forward_and_get_loss(self, batch, prefix='', debug=False):
@@ -294,19 +340,12 @@ class VBD(pl.LightningModule):
         T_future_steps = T_future_and_cur // self._action_len
         D_predict = 2
 
-        anchors = batch['anchors'][0].cpu().numpy()
-        anchors = interpolate_anchors(anchors, self._future_len + 1)
-        self.anchor_tensor = torch.tensor(anchors, dtype=torch.float32).to('cuda')
-        # batch['anchors']: B, A_pred, Q, T_future_and_cur, D_predict
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(B, self._agents_len, -1, -1, -1)
-
         # TODO: Investigate why this to NAN
         # agents_future_valid = batch['agents_future_valid'][:, :self._agents_len]
         agents_future_valid = torch.ne(agents_future.sum(-1), 0)
         agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
             agents_future_valid) & agents_future_valid # B, A_all, T_future_and_cur
         agents_interested = batch['agents_interested']
-        anchors = batch['anchors']
         
         # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
         agents_history = batch['agents_history']
@@ -323,8 +362,6 @@ class VBD(pl.LightningModule):
         debug_outputs = {}
         total_loss = 0
 
-        goal_scores = None
-
 
         ############## Run Encoder ##############
         encoder_outputs = self.encoder(batch)
@@ -333,39 +370,76 @@ class VBD(pl.LightningModule):
         agents_interested = agents_interested[:, :self._agents_len] # B, A_pred
 
 
+        ############# Offset Calculation #############
+        # --- Offset 计算：计算未来轨迹相对于锚点轨迹的偏移量 ---
+        B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
+        A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A_pred] 的车辆索引
+
+        # B, A_pred, T_future_and_cur, 2
+        gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :D_predict]
+
+        valid_sparse = agents_future_valid[:, :, ::self._action_len]  # B, A_pred, T_future_steps
+        diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, T_future_steps]
+        diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, T_future_steps, 1] 以便广播
+
+        # B, A_pred, T_future_steps, 2
+        gt_future_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
+
+        gt_masked = gt_future_diff.unsqueeze(2) * diff_valid_mask.unsqueeze(2)
+        anchor_masked = self.anchor_diffs.unsqueeze(0).unsqueeze(0) * diff_valid_mask.unsqueeze(2)
+        masked_diff = gt_masked - anchor_masked  # [B, A_pred, N, T_future_steps, 2]
+        distances_sq = torch.sum(masked_diff**2, dim=[-1, -2]) # [B, A, 16384]
+
+        nearest_fine_anchor_indices = torch.argmin(distances_sq, dim=2) # [B, A]
+
+        # gt_future_diff = gt_future_diff * diff_valid_mask.float()
+        # gt_future_diff_flat = gt_future_diff.reshape(B * self._agents_len, -1)
+
+        # dists = torch.cdist(gt_future_diff_flat, self.anchor_diffs_flat) # [B*A, 16384]
+        # nearest_fine_anchor_indices = torch.argmin(dists, dim=1)
+
+        best_anchor_diff = self.anchor_diffs[nearest_fine_anchor_indices]  # B, A_pred, T_future_steps, 2
+        target_cluster_indices = self.cluster_labels[nearest_fine_anchor_indices]
+        target_cluster_center_diff = self.cluster_diffs[target_cluster_indices]  # B, A_pred, T_future_steps, 2
+
+        target_cluster_to_gt_diff_offset = gt_future_diff - target_cluster_center_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
+        target_anchor_to_gt_diff_offset = gt_future_diff - best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
+
+        target_anchor_to_gt_diff_offset = target_anchor_to_gt_diff_offset * diff_valid_mask.float()
+        target_cluster_to_gt_diff_offset = target_cluster_to_gt_diff_offset * diff_valid_mask.float()
+
+
         ############### Behavior Prior Prediction #################
         if self._train_predictor:
-            goal_outputs = self.forward_predictor(encoder_outputs)
+            mask_shape = (B, self._agents_len)
+            dropout_mask = (torch.rand(mask_shape, device=self.device) < self._intent_dropout)
+            intent_command = torch.where(dropout_mask, 0, target_cluster_indices.view(B, self._agents_len))
+
+            goal_outputs = self.forward_conditioner(encoder_outputs, intent_command, target_cluster_center_diff.view(B, self._agents_len, -1, self.diff_dim))
             debug_outputs.update(goal_outputs)
 
             # get loss
-            goal_scores = goal_outputs['goal_scores'] # B, A_pred, Q
-            # goal_types = goal_outputs['goal_types']
-            goal_trajs = goal_outputs['goal_trajs'] # B, A_pred, Q, T_future, 5
+            coarse_offsets = goal_outputs['pred_offsets'] # B, A_pred, T_future, 5
+            coarse_trajs = goal_outputs['coarse_trajs'] # B, A_pred, T_future, 5
+            cluster_scores = goal_outputs['cluster_scores'] # B, A_pred, num_clusters
 
-            (goal_loss_mean, 
-            score_loss_mean, 
-            gt_ranking, # B * A_pred, Q 
-            ade_for_ranking # B * A_pred, Q
-            ) = self.goal_loss(
-                goal_trajs, goal_scores, agents_future,
-                agents_future_valid, anchors,
-                agents_interested,
-            )
+            coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_offsets, cluster_scores, 
+                                              target_cluster_to_gt_diff_offset, target_cluster_indices,
+                                              diff_valid_mask, agents_interested)
 
-            pred_loss = self.goal_loss_weight * goal_loss_mean + self.score_loss_weight * score_loss_mean
+            pred_loss = self.goal_loss_weight * coarse_traj_loss + self.score_loss_weight * cluster_score_loss
             total_loss += self.predictor_loss_weight * pred_loss
 
             pred_ade, pred_fde = self.calculate_metrics_predict(
-                goal_trajs, agents_future, agents_future_valid, agents_interested, 8
+                coarse_trajs, agents_future, agents_future_valid, agents_interested, 8
             )
             # pred_ade, pred_fde = self.calculate_metrics_predict_new(
             #     goal_trajs, agents_future, agents_future_valid, agents_interested, 16
             # )
 
             log_dict.update({
-                prefix + 'goal_loss': goal_loss_mean.item(),
-                prefix + 'score_loss': score_loss_mean.item(),
+                prefix + 'goal_loss': coarse_traj_loss.item(),
+                prefix + 'score_loss': cluster_score_loss.item(),
                 prefix + 'pred_ADE': pred_ade,
                 prefix + 'pred_FDE': pred_fde,
             })
@@ -374,33 +448,7 @@ class VBD(pl.LightningModule):
         ############### Denoise #################
         if self._train_denoiser:
             # get predicted anchor
-            assert goal_scores != None, 'No valid goal predictions yet.'
-            B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
-            A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A_pred] 的车辆索引
-
-            # B, A_pred, T_future_and_cur, 2
-            gt_future_local = agents_local[:, :self._agents_len, T_history_and_cur - 1:, :2]
-
-            valid_sparse = agents_future_valid[:, :, ::self._action_len]  # B, A_pred, T_future_steps
-            diff_valid_mask = valid_sparse[:, :, :-1] & valid_sparse[:, :, 1:] # [B, A_pred, T_future_steps]
-            diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, T_future_steps, 1] 以便广播
-
-            # B, A_pred, T_future_steps, 2
-            gt_future_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
-            gt_future_diff = gt_future_diff * diff_valid_mask.float()
-
-            # Use best matched anchor to train
-            best_anchor_idx = gt_ranking[:, 0].view(B, self._agents_len)  # B, A_pred
-
-            # Select the best anchor trajectory first
-            best_anchors = anchors[
-                B_idx, A_idx, best_anchor_idx
-            ]  # B, A_pred, T_future_and_cur, 2
-
-            # Then calculate the difference
-            best_anchor_diff = torch.diff(best_anchors[:, :, ::self._action_len, :], dim=-2)  # B, A_pred, T_future_steps, 2
-            target_offset = gt_future_diff - best_anchor_diff  # B, A_pred, T_future_steps, 2
-            target_offset = target_offset * diff_valid_mask.float()
+            assert cluster_scores != None, 'No valid goal predictions yet.'
 
             # Predicted anchor
             # best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
@@ -441,26 +489,26 @@ class VBD(pl.LightningModule):
             # ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
 
             # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
-
+ 
             # noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
-            noise = torch.randn_like(target_offset) # B, A_pred, T_future_steps, 2
+            noise = torch.randn_like(target_anchor_to_gt_diff_offset) # B, A_pred, T_future_steps, 2
 
-            target_offset_norm = self.normalize_anchor_increments(target_offset)
+            target_offset_norm = self.normalize_anchor_increments(target_anchor_to_gt_diff_offset)
 
             noised_target_offset_norm = self.noise_scheduler.add_noise(
                 target_offset_norm,
                 noise,
                 diffusion_steps
             )
-            noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
+            # noised_target_offset_norm = torch.clamp(noised_target_offset_norm, min=-1, max=1)
 
             # noised_target_offset = self.unnormalize_anchor_increments(noised_target_offset_norm) # B, A_pred, T_future_steps, 2
 
             # Inverse diffusion
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
-                                                    best_anchor_diff)
+                                                    best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_trajs']: B, A_pred, T_future, 5
@@ -472,17 +520,12 @@ class VBD(pl.LightningModule):
 
             # Get Loss
             denoised_trajs = denoise_outputs['denoised_trajs']
+            denoised_offset = denoise_outputs['denoised_offset']
             if self._prediction_type == 'sample':
-                # state_loss_mean, yaw_loss_mean = self.denoise_loss(
-                #     denoised_trajs,
-                #     agents_future, agents_future_valid,
-                #     agents_interested,
-                # )
-                # denoise_loss = state_loss_mean + yaw_loss_mean
-                traj_loss = self.traj_loss(
-                    denoised_trajs, agents_future, agents_future_valid, agents_interested
+                diff_loss = self.diff_loss(
+                    denoised_offset, target_anchor_to_gt_diff_offset, diff_valid_mask, agents_interested
                 )
-                total_loss += self.denoiser_loss_weight * (self.traj_loss_weight * traj_loss)
+                total_loss += self.denoiser_loss_weight * (self.traj_loss_weight * diff_loss)
 
                 # Predict the noise
                 # _, diffusion_loss = self.noise_scheduler.get_noise(
@@ -491,20 +534,9 @@ class VBD(pl.LightningModule):
                 #     timesteps=diffusion_steps,
                 #     gt_noise=noise,
                 # )
-                # _, diffusion_loss = self.noise_scheduler.get_noise(
-                #     x_0=denoise_outputs['denoised_trajs_origin'][..., :D_predict],
-                #     x_t=noised_anchors_gt,
-                #     timesteps=diffusion_steps,
-                #     gt_noise=noise,
-                # )
 
-                # log_dict.update({
-                #     prefix + 'state_loss': state_loss_mean.item(),
-                #     prefix + 'yaw_loss': yaw_loss_mean.item(),
-                #     prefix + 'diffusion_loss': diffusion_loss.item()
-                # })
                 log_dict.update({
-                    prefix + 'traj_loss': traj_loss.item(),
+                    prefix + 'traj_loss': diff_loss.item(),
                     # prefix + 'diffusion_loss': diffusion_loss.item()
                 })
 
@@ -618,28 +650,6 @@ class VBD(pl.LightningModule):
             batch: Input batch.
             batch_idx: Batch index.
         """
-        global_step = self.global_step
-
-        if self.use_gumbel_anneal:
-            if global_step >= self._gumbel_anneal_steps // self.accumulate_grad_batches:
-                self._gumbel_tau = self._gumbel_tau_end
-            else:
-                tau_decay = (self._gumbel_tau_start - self._gumbel_tau_end) * (
-                    1 - global_step / (self._gumbel_anneal_steps // self.accumulate_grad_batches)
-                )
-                self._gumbel_tau = self._gumbel_tau_end + tau_decay
-        else:
-            self._gumbel_tau = self._gumbel_tau_end
-
-        if self.use_dynamic_rank_weight:
-            if global_step < self.rank_weight_anneal_steps // self.accumulate_grad_batches:
-                progress = global_step / (self.rank_weight_anneal_steps // self.accumulate_grad_batches)
-                self.rank_loss_weight = self.rank_weight_start + (self.rank_weight_end - self.rank_weight_start) * progress
-            else:
-                self.rank_loss_weight = self.rank_weight_end
-        else:
-            self.rank_loss_weight = self.rank_weight_end
-
         loss, log_dict = self.forward_and_get_loss(batch, prefix='val/')
         self.log_dict(log_dict,
                       on_step=False, on_epoch=True, sync_dist=True,
@@ -744,11 +754,37 @@ class VBD(pl.LightningModule):
         trajs_loss_mean = trajs_loss.sum() / trajs_mask.sum()
 
         return trajs_loss_mean
+    
+    def diff_loss(
+            self, diffs, diffs_gt, diffs_valid, agents_interested
+    ):
+        """
+        Calculates the loss for trajectory difference prediction.
+
+        Args:
+            diffs (torch.Tensor): Tensor of shape [B, A_pred, T_future_steps, 2] representing predicted trajectory differences.
+            diffs_gt (torch.Tensor): Tensor of shape [B, A_pred, T_future_steps, 2] representing ground truth trajectory differences.
+            diffs_valid (torch.Tensor): Tensor of shape [B, A_pred, T_future_steps] representing validity of trajectory differences.
+            agents_interested (torch.Tensor): Tensor of shape [B, A_pred] representing interest in agents.
+
+        Returns:
+            diff_loss_mean (torch.Tensor): Mean difference loss.
+        """
+        # Get Mask
+        diff_mask = diffs_valid.squeeze(-1) * (agents_interested.unsqueeze(-1) > 0)
+
+        # Calculate the diff loss
+        diff_loss = smooth_l1_loss(diffs, diffs_gt, reduction='none').sum(-1)
+        diff_loss = diff_loss * diff_mask
+
+        # Calculate the mean loss
+        diff_loss_mean = diff_loss.sum() / diff_mask.sum()
+
+        return diff_loss_mean
 
     def goal_loss(
-            self, trajs, scores, agents_future,
-            agents_future_valid, anchors,
-            agents_interested
+            self, coarse_offsets, cluster_scores, target_offsets, target_indices,
+            diff_valid_mask, agents_interested
     ):
         """
         Calculates the loss for trajectory prediction.
@@ -759,8 +795,8 @@ class VBD(pl.LightningModule):
             scores (torch.Tensor): Predicted scores (logits) for anchors, shape [B, A_pred, Q].
             agents_future (torch.Tensor): Ground truth future agent states, shape [B, A_pred, T_future_and_cur, 5].
             agents_future_valid (torch.Tensor): Validity of future states, shape [B, A_pred, T_future_and_cur].
-            anchors (torch.Tensor): Anchor trajectories in local frame, shape [B, A_pred, Q, T_future_and_cur, 2].
             agents_interested (torch.Tensor): Interest in agents, shape [B, A_pred].
+            cluster_gts (torch.Tensor): Ground truth cluster indices for each agent, shape [B, A_pred].
 
         Returns:
             traj_loss_mean (torch.Tensor): Mean regression loss for the best predicted trajectory.
@@ -768,119 +804,57 @@ class VBD(pl.LightningModule):
             gt_ranking (torch.Tensor): Ground truth ranking of anchors based on ADE, shape [B * A_pred, Q].
             ade (torch.Tensor): ADE for each anchor, shape [B * A_pred, Q].
         """
-        num_batch, num_agents, num_query, _, _ = trajs.shape
-        num_timesteps_future = agents_future.shape[2]
+        agents_interested_flat = agents_interested.flatten().float()  # [B * A_pred]
 
-        # --- 1. Get Ground Truth Ranking based on Anchors ---
-        current_states = agents_future[:, :, 0, :3]
-        global_anchors = batch_transform_trajs_to_global_frame(anchors, current_states)
-
-        traj_mask = agents_future_valid[..., 1:] * (agents_interested[..., None] > 0)
-        trajs_gt = agents_future[:, :, 1:, :2].flatten(0, 1)
-        global_anchors_flat = global_anchors[:, :, :, 1:, :2].flatten(0, 1)
-        scores_flat = scores.flatten(0, 1)
-        flat_traj_mask = traj_mask.flatten(0, 1)
-        flat_agents_interested = agents_interested.flatten(0, 1) > 0
-
-        dist = torch.norm(global_anchors_flat - trajs_gt.unsqueeze(1), dim=-1)
-        dist = dist * flat_traj_mask.unsqueeze(1)
-        ade = dist.sum(-1) / torch.clamp(flat_traj_mask.sum(-1, keepdim=True), min=1.0)
-        gt_ranking = torch.argsort(ade, dim=-1)
-
-        # --- 2. Calculate Score Loss based on configured type ---
+        # --- Calculate Score Loss based on configured type ---
         score_loss = 0.0
+        num_batch, num_agents, num_timesteps_future, _ = coarse_offsets.shape
+        num_query = cluster_scores.shape[-1]
 
         # BCE Loss Calculation
         if self.score_loss_type in ['bce', 'mix']:
-            best_anchor_idx = gt_ranking[:, 0]
-            bce_target = torch.nn.functional.one_hot(best_anchor_idx, num_classes=num_query).float()
-            bce_loss = binary_cross_entropy_with_logits(scores_flat, bce_target, reduction='none').sum(dim=-1)
+            bce_target = torch.nn.functional.one_hot(target_indices, num_classes=num_query).float()
+            bce_loss = binary_cross_entropy_with_logits(cluster_scores.view(-1, num_query), bce_target, reduction='none').sum(dim=-1)
             score_loss += self.bce_loss_weight * bce_loss
 
-        # Rank Loss (Plackett-Luce) Calculation
-        if self.score_loss_type in ['rank', 'mix']:
-            ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
-            log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
-            pl_log_probs = ranked_scores - log_denominators
+        # # Rank Loss (Plackett-Luce) Calculation
+        # if self.score_loss_type in ['rank', 'mix']:
+        #     ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
+        #     log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
+        #     pl_log_probs = ranked_scores - log_denominators
 
-            if self.use_focused_rank_loss:
-                rank_topk_mask = torch.zeros_like(pl_log_probs)
-                rank_topk_mask[:, :self.focused_rank_topk] = 1.0
-                pl_log_probs = pl_log_probs * rank_topk_mask
+        #     if self.use_focused_rank_loss:
+        #         rank_topk_mask = torch.zeros_like(pl_log_probs)
+        #         rank_topk_mask[:, :self.focused_rank_topk] = 1.0
+        #         pl_log_probs = pl_log_probs * rank_topk_mask
 
-            rank_loss = -pl_log_probs.sum(dim=-1)
+        #     rank_loss = -pl_log_probs.sum(dim=-1)
 
-            # Soft Contrastive Hinge Loss
-            if self.use_hinge_loss:
-                worst_topk_idx = gt_ranking[:, self.focused_rank_topk - 1]
-                best_bottomk_idx = gt_ranking[:, -self.focused_rank_topk]
-                worst_topk_scores = torch.gather(scores_flat, 1, worst_topk_idx.unsqueeze(-1)).squeeze(-1)
-                best_bottomk_scores = torch.gather(scores_flat, 1, best_bottomk_idx.unsqueeze(-1)).squeeze(-1)
-                score_diff_logits = worst_topk_scores - best_bottomk_scores
-                target = torch.ones_like(score_diff_logits)
-                soft_hinge_loss = binary_cross_entropy_with_logits(
-                    score_diff_logits, target, reduction='none').sum(dim=-1)
-                rank_loss += self.soft_hinge_loss_weight * soft_hinge_loss
+        #     # Soft Contrastive Hinge Loss
+        #     if self.use_hinge_loss:
+        #         worst_topk_idx = gt_ranking[:, self.focused_rank_topk - 1]
+        #         best_bottomk_idx = gt_ranking[:, -self.focused_rank_topk]
+        #         worst_topk_scores = torch.gather(scores_flat, 1, worst_topk_idx.unsqueeze(-1)).squeeze(-1)
+        #         best_bottomk_scores = torch.gather(scores_flat, 1, best_bottomk_idx.unsqueeze(-1)).squeeze(-1)
+        #         score_diff_logits = worst_topk_scores - best_bottomk_scores
+        #         target = torch.ones_like(score_diff_logits)
+        #         soft_hinge_loss = binary_cross_entropy_with_logits(
+        #             score_diff_logits, target, reduction='none').sum(dim=-1)
+        #         rank_loss += self.soft_hinge_loss_weight * soft_hinge_loss
 
-            score_loss += self.rank_loss_weight * rank_loss
+        #     score_loss += self.rank_loss_weight * rank_loss
 
         # Average the loss over valid agents
-        score_loss = score_loss * flat_agents_interested
-        score_loss_mean = score_loss.sum() / torch.clamp(flat_agents_interested.sum(), min=1.0)
+        score_loss = score_loss * (agents_interested_flat > 0).float()
+        score_loss_mean = score_loss.sum() / torch.clamp((agents_interested_flat > 0).sum(), min=1.0)
 
         # --- 3. Calculate regression loss for the best *predicted* trajectory ---
-        trajs_pred_flat = trajs.flatten(0, 1)[:, :, :, :2]
-        best_gt_idx = gt_ranking[:, 0]
-        trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_gt_idx]
-        # best_pred_idx = torch.argmax(scores_flat, dim=-1)
-        # trajs_select = trajs_pred_flat[torch.arange(num_batch * num_agents), best_pred_idx]
-        
-        traj_loss = smooth_l1_loss(trajs_select[:, :num_timesteps_future-1], trajs_gt, reduction='none').sum(-1)
-        traj_loss = traj_loss * flat_traj_mask
-        traj_loss_mean = traj_loss.sum() / torch.clamp(flat_traj_mask.sum(), min=1.0)
+        traj_loss = smooth_l1_loss(coarse_offsets, target_offsets, reduction='none').sum(-1)
+        valid_mask = diff_valid_mask.squeeze(-1) * (agents_interested.unsqueeze(-1) > 0)  # [B, A_pred, T_future_steps]
+        traj_loss = traj_loss * valid_mask.float()
+        traj_loss_mean = traj_loss.sum() / torch.clamp(valid_mask.sum(), min=1.0)
 
-        return traj_loss_mean, score_loss_mean, gt_ranking, ade
-
-    def goal_loss_new(
-            self, trajs, types, agents_future,
-            agents_future_valid, agents_interested
-    ):
-        """
-        Calculates the loss for trajectory prediction.
-
-        Args:
-            trajs (torch.Tensor): Tensor of shape [B, A, T, 3] representing predicted trajectories.
-            types (torch.Tensor): Tensor of shape [B, A, 10] representing predicted types.
-            agents_future (torch.Tensor): Tensor of shape [B, A, T, 3] representing future agent states.
-            agents_future_valid (torch.Tensor): Tensor of shape [B, A, T] representing validity of future agent states.
-            agents_interested (torch.Tensor): Tensor of shape [B, A] representing interest in agents.
-
-        Returns:
-            traj_loss_mean (torch.Tensor): Mean trajectory loss.
-            score_loss_mean (torch.Tensor): Mean score loss.
-        """
-
-        # Get Mask
-        traj_mask = agents_future_valid[..., 1:] * (agents_interested[..., None] > 0)  # [B, A, T]
-
-        # Flatten batch and agents
-        trajs_gt = agents_future[:, :, 1:, :3].flatten(0, 1)  # [B*A, T, 3]
-        trajs = trajs.flatten(0, 1)[..., :3]  # [B*A, T, 3]
-        types = types.flatten(0, 1)  # [B*A, 10]
-        types_gt = get_trajectory_type(trajs_gt)
-
-        # Calculate the trajectory loss
-        traj_loss = smooth_l1_loss(trajs, trajs_gt, reduction='none').sum(-1)  # [B*A, T]
-        traj_loss = traj_loss * traj_mask.flatten(0, 1)  # [B*A, T]
-
-        # Calculate the score loss
-        score_loss = cross_entropy(types, types_gt, reduction='none')  # [B*A]
-        score_loss = score_loss * (agents_interested.flatten(0, 1) > 0)  # [B*A]
-
-        # Calculate the mean loss
-        traj_loss_mean = traj_loss.sum() / traj_mask.sum()
-        score_loss_mean = score_loss.sum() / (agents_interested > 0).sum()
-
+        # --- 4. Return losses ---
         return traj_loss_mean, score_loss_mean
 
     @torch.no_grad()
@@ -937,58 +911,16 @@ class VBD(pl.LightningModule):
 
         if not top_k:
             top_k = self._agents_len
-        goal_trajs = goal_trajs[:, :top_k, :, :, :2]  # [B, A, Q, T, 2]
+        goal_trajs = goal_trajs[:, :top_k, :, :2]  # [B, A, T, 2]
         gt = agents_future[:, :top_k, 1:, :2]  # [B, A, T, 2]
         gt_mask = (agents_future_valid[:, :top_k, 1:]
                    & (agents_interested[:, :top_k, None] > 0)).bool()  # [B, A, T]
 
-        goal_mse = torch.norm(goal_trajs - gt[:, :, None, :, :], dim=-1)  # [B, A, Q, T]
-        goal_mse = goal_mse * gt_mask[..., None, :]  # [B, A, Q, T]
-        best_idx = torch.argmin(goal_mse.sum(-1), dim=-1)
-
-        best_goal_mse = goal_mse[torch.arange(goal_mse.shape[0])[:, None],
-        torch.arange(goal_mse.shape[1])[None, :],
-        best_idx]
-
-        goal_ADE = best_goal_mse.sum() / gt_mask.sum()
-        goal_FDE = best_goal_mse[..., -1].sum() / gt_mask[..., -1].sum()
-
-        return goal_ADE.item(), goal_FDE.item()
-
-    @torch.no_grad()
-    def calculate_metrics_predict_new(self,
-                                      goal_trajs, agents_future, agents_future_valid,
-                                      agents_interested, top_k=None
-                                      ):
-        """
-        Calculates the metrics for predicting goal trajectories.
-
-        Args:
-            goal_trajs (torch.Tensor): Tensor of shape [B, A, Q, T, 2] representing the goal trajectories.
-            agents_future (torch.Tensor): Tensor of shape [B, A, T, 2] representing the future trajectories of agents.
-            agents_future_valid (torch.Tensor): Tensor of shape [B, A, T] representing the validity of future trajectories.
-            agents_interested (torch.Tensor): Tensor of shape [B, A] representing the interest level of agents.
-            top_k (int, optional): The number of top agents to consider. Defaults to None.
-
-        Returns:
-            tuple: A tuple containing the goal Average Displacement Error (ADE) and goal Final Displacement Error (FDE).
-        """
-
-        if not top_k:
-            top_k = self._agents_len
-        goal_trajs = goal_trajs[:, :top_k, :, :2]  # [B, A, T, 2]
-        gt = agents_future[:, :top_k, 1:, :2]  # [B, A, T, 2]
-        gt_mask = (agents_future_valid[:, :top_k, 1:] \
-                   & (agents_interested[:, :top_k, None] > 0)).bool()  # [B, A, T]
-
-        goal_mse = torch.norm(goal_trajs - gt, dim=-1)  # [B, A, T]
+        goal_mse = torch.norm(goal_trajs - gt[:, :, :, :], dim=-1)  # [B, A, T]
         goal_mse = goal_mse * gt_mask  # [B, A, T]
-        best_idx = torch.argmin(goal_mse.sum(-1), dim=-1)
 
-        best_goal_mse = goal_mse[torch.arange(goal_mse.shape[0]), best_idx, :]
-
-        goal_ADE = best_goal_mse.sum() / gt_mask.sum()
-        goal_FDE = best_goal_mse[..., -1].sum() / gt_mask[..., -1].sum()
+        goal_ADE = goal_mse.sum() / gt_mask.sum()
+        goal_FDE = goal_mse[..., -1].sum() / gt_mask[..., -1].sum()
 
         return goal_ADE.item(), goal_FDE.item()
 
