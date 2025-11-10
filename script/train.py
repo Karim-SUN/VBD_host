@@ -151,13 +151,19 @@ def train(cfg):
         ]
     )
     print("Build Trainer")
+
+    ckpt = torch.load(cfg["init_from"], map_location="cpu")
+    model.load_state_dict(ckpt["state_dict"], strict=True)
+
+    # IMPORTANT: do NOT pass ckpt_path so optimizer won't be restored
+    trainer.fit(model, train_loader, val_loader, ckpt_path=None)
     
-    trainer.fit(
-        model, 
-        train_loader, 
-        val_loader, 
-        ckpt_path=cfg.get("init_from")
-    )
+    # trainer.fit(
+    #     model, 
+    #     train_loader, 
+    #     val_loader, 
+    #     ckpt_path=cfg.get("init_from")
+    # )
     
 def build_parser():
     parser = argparse.ArgumentParser()

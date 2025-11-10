@@ -1,23 +1,20 @@
 model_name: VBD
 
 # Data Config
+train_data_path: /media/huang/0CB911D80CB911D8/train_processed/processed
 # train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
-# val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
-# anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
-# log_dir: ./train_log
-train_data_path: /home/karim/VBD/data/train
-val_data_path: /home/karim/VBD/data/val
-anchor_path: vbd/data/cluster_64_center_dict.pkl
+val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
+anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
 log_dir: ./train_log
 
 # Wandb Config
-use_wandb: False
+use_wandb: True
 username: karim-sun
 project: vbd
-wandb_dir: ./wandb_logs # 自定义wandb日志的根目录
+wandb_dir: /home/huang/Mount_Disk/shy/ # 自定义wandb日志的根目录
 
 # Checkpoint Config
-init_from: null
+init_from: /home/huang/Mount_Disk/shy/VBD_host/train_log/VBD_20251030203608/epoch=05.ckpt
 
 # Model Config
 agents_len: 16
@@ -30,7 +27,7 @@ history_dropout: 0.4
 
 # Task Probabilities for get_random_mask
 task_probabilities:
-  prediction: 0.8
+  prediction: 1.0
   goal_conditioned: 0.08
   agent_reactive: 0.08
   reconstruction: 0.04
@@ -64,22 +61,22 @@ anchor_incre_max: [7, 2]
 seed: 21
 batch_size: 10
 num_workers: 32
-accumulate_grad_batches: 2 # 会影响实际的lr steps等
-lr: 0.0002 # 0.0002
+accumulate_grad_batches: 4 # 会影响实际的lr steps等
+lr: 0.0001 # 0.0002
 weight_decay: 0.01
-epochs: 10
-lr_warmup_step: 8000
-lr_total_steps: 97420 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
+epochs: 4
+lr_warmup_step: 4000
+lr_total_steps: 38968 # 估算的总训练步数 (例如: 12 epochs * 3500 steps/epoch)
 lr_end_factor: 0.05 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
 random_target: 0.1
 
 # Loss Weights
-score_loss_type: "mix" # 'bce', 'rank', or 'mix'
+score_loss_type: "bce" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0
 rank_weight_end: 0.1
-rank_weight_anneal_steps: 4800
+rank_weight_anneal_steps: 20000
 
 use_focused_rank_loss: True
 focused_rank_topk: 5

@@ -147,7 +147,7 @@ class VBD(pl.LightningModule):
 
         assert len(params_to_update) > 0, 'No parameters to update'
 
-        optimizer = bnb_optim.AdamW8bit(  # 使用 8-bit 版本
+        optimizer = torch.optim.AdamW(  # 使用 8-bit 版本
             params_to_update,
             lr=self.cfg['lr'],
             weight_decay=self.cfg['weight_decay']
@@ -614,6 +614,28 @@ class VBD(pl.LightningModule):
             batch: Input batch.
             batch_idx: Batch index.
         """
+        global_step = self.global_step
+
+        if self.use_gumbel_anneal:
+            if global_step >= self._gumbel_anneal_steps // self.accumulate_grad_batches:
+                self._gumbel_tau = self._gumbel_tau_end
+            else:
+                tau_decay = (self._gumbel_tau_start - self._gumbel_tau_end) * (
+                    1 - global_step / (self._gumbel_anneal_steps // self.accumulate_grad_batches)
+                )
+                self._gumbel_tau = self._gumbel_tau_end + tau_decay
+        else:
+            self._gumbel_tau = self._gumbel_tau_end
+
+        if self.use_dynamic_rank_weight:
+            if global_step < self.rank_weight_anneal_steps // self.accumulate_grad_batches:
+                progress = global_step / (self.rank_weight_anneal_steps // self.accumulate_grad_batches)
+                self.rank_loss_weight = self.rank_weight_start + (self.rank_weight_end - self.rank_weight_start) * progress
+            else:
+                self.rank_loss_weight = self.rank_weight_end
+        else:
+            self.rank_loss_weight = self.rank_weight_end
+
         loss, log_dict = self.forward_and_get_loss(batch, prefix='val/')
         self.log_dict(log_dict,
                       on_step=False, on_epoch=True, sync_dist=True,
