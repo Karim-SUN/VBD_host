@@ -299,7 +299,7 @@ class VBD(pl.LightningModule):
             predictor_outputs: Dictionary containing the predictor outputs.
         """
         # Predict offset
-        pred_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command)
+        pred_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command, target_cluster_center_diffs)
 
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
@@ -479,7 +479,7 @@ class VBD(pl.LightningModule):
             # anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # Calculate increments from anchors
 
             diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps * 1 // 20, (B,),
+                1, self.noise_scheduler.num_steps * 1 // 50, (B,),
                 device=agents_future.device
             ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) # B, A_pred, 1, 1
 
@@ -489,7 +489,7 @@ class VBD(pl.LightningModule):
             # ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
 
             # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
- 
+
             # noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
             noise = torch.randn_like(target_anchor_to_gt_diff_offset) # B, A_pred, T_future_steps, 2
@@ -508,7 +508,7 @@ class VBD(pl.LightningModule):
             # Inverse diffusion
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
-                                                    best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
+                                                     best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_trajs']: B, A_pred, T_future, 5
@@ -814,8 +814,8 @@ class VBD(pl.LightningModule):
         # BCE Loss Calculation
         if self.score_loss_type in ['bce', 'mix']:
             bce_target = torch.nn.functional.one_hot(target_indices, num_classes=num_query).float()
-            bce_loss = binary_cross_entropy_with_logits(cluster_scores.view(-1, num_query), bce_target, reduction='none').sum(dim=-1)
-            score_loss += self.bce_loss_weight * bce_loss
+            bce_loss = binary_cross_entropy_with_logits(cluster_scores, bce_target, reduction='none').sum(dim=-1)
+            score_loss += self.bce_loss_weight * bce_loss.view(-1)  # [B * A_pred]
 
         # # Rank Loss (Plackett-Luce) Calculation
         # if self.score_loss_type in ['rank', 'mix']:

@@ -9,7 +9,7 @@ cluster_path: vbd/data/clusters_nms.pkl
 log_dir: ./train_log
 
 # Wandb Config
-use_wandb: False
+use_wandb: True
 username: karim-sun
 project: vbd
 wandb_dir: /home/huang/Mount_Disk/shy/ # 自定义wandb日志的根目录
@@ -74,6 +74,7 @@ precision: "bf16-mixed"
 random_target: 0.1
 
 # Loss Weights
+score_loss_type: "bce" # 'bce', 'rank', or 'mix'
 score_loss_type: "bce" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0

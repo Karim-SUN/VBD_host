@@ -120,10 +120,19 @@ class IntentConditioner(nn.Module):
         # +1 是为 CFG 的 NULL 意图 (e.g., 索引 0) 
         self.cluster_embed = nn.Embedding(num_clusters + 1, d_model)
 
-        # 3. 融合层 (重用现有的 CrossTransformer)
+        # 3. [新] 锚点轨迹先验编码器 (将 [40, 2] 编码为 d_model)
+        #    使用一个简单的 MLP 将扁平化的轨迹编码
+        self.anchor_traj_encoder = nn.Sequential(
+            nn.Linear(self.num_diff_steps * self.diff_dim, d_model * 2),
+            nn.ELU(),
+            nn.Linear(d_model * 2, d_model)
+        )
+        self.null_anchor_embedding = nn.Parameter(torch.randn(1, 1, d_model))
+
+        # 4. 融合层 (重用现有的 CrossTransformer)
         self.attention_layers = nn.ModuleList([CrossTransformer() for _ in range(4)])
         
-        # 4. 输出头 (回归偏移量)
+        # 5. 输出头 (回归偏移量)
         self.offset_decoder = nn.Sequential(
             nn.Linear(d_model, d_model * 2),
             nn.ELU(),
@@ -144,12 +153,12 @@ class IntentConditioner(nn.Module):
             nn.Linear(d_model * 2, num_clusters)
         )
 
-    def forward(self, encoder_outputs, intent_command):
+    def forward(self, encoder_outputs, intent_command, target_cluster_center_diffs):
         """
         Args:
             encoder_outputs (dict): 来自 Encoder 的输出.
             intent_command (torch.Tensor): 形状为 [B, A_pred] 的意图簇索引 (long).
-                                           (包含 0 作为 NULL 意图).
+            target_cluster_center_diffs (torch.Tensor): 形状为 [B, A_pred, T_diff, D_diff] 的簇中心轨迹.
         Returns:
             torch.Tensor: 预测的粗略偏移量, 形状 [B, A_pred, T_diff, D_diff].
         """
@@ -164,10 +173,24 @@ class IntentConditioner(nn.Module):
         # 1. 将意图索引 [B, A] 转换为嵌入向量
         # 形状: [B, A, D_model]
         intent_embedding = self.cluster_embed(intent_command)
+
+        # 扁平化: [B, A, 80]
+        flat_anchor_diffs = target_cluster_center_diffs.flatten(2)
+        # 编码: [B, A, D_model]
+        anchor_traj_embedding = self.anchor_traj_encoder(flat_anchor_diffs)
+
+        # 当为 NULL 时, 将轨迹嵌入替换为 *可学习* 的 null_anchor_embedding
+        null_mask = (intent_command == 0).unsqueeze(-1)
+        anchor_traj_embedding = torch.where(
+            null_mask, 
+            self.null_anchor_embedding, # [B=1, A=1, D] (广播)
+            anchor_traj_embedding        # [B, A, D]
+        )
         
         # 2. 为 CrossTransformer 准备查询 (Query)
         # 形状: [B, A, 1, D_model]
-        query = intent_embedding.unsqueeze(2)
+        query_base = intent_embedding + anchor_traj_embedding
+        query = query_base.unsqueeze(2)
 
         coarse_offsets_list = []
         cluster_score_list = []
