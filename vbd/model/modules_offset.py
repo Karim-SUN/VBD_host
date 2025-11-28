@@ -76,6 +76,7 @@ class Encoder(nn.Module):
         # transformer encoding
         encoder_outputs = {}
         encoder_outputs['agents'] = agents_features
+        encoder_outputs['agents_local'] = inputs['agents_local']
         encoder_outputs['anchors'] = inputs['anchors']
         encoder_outputs['agents_mask'] = agents_mask
         encoder_outputs['maps_mask'] = maps_mask

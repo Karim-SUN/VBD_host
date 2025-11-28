@@ -270,8 +270,8 @@ class VBD(pl.LightningModule):
             prediction_type=self._prediction_type
         )
         T_history_and_cur = encoder_outputs['T0']
-        current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
-        assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
+        current_states = encoder_outputs['agents_local'][:, :self._agents_len, T_history_and_cur - 1]
+        assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
@@ -284,7 +284,7 @@ class VBD(pl.LightningModule):
         return {
             'denoiser_output': denoiser_output,
             'denoised_offset': denoised_offset,
-            'denoised_trajs': denoised_trajs,
+            'denoised_local_trajs': denoised_trajs,
             'denoised_trajs_origin': denoised_trajs_origin,
         }
 
@@ -303,18 +303,18 @@ class VBD(pl.LightningModule):
 
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
-        current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
-        assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
+        current_states = encoder_outputs['agents_local'][:, :self._agents_len, T_history_and_cur - 1]
+        assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
         coarse_diffs = pred_offsets + target_cluster_center_diffs
-        coarse_trajs, _ = roll_out_new(
+        coarse_local_trajs, _ = roll_out_new(
             current_states, coarse_diffs, global_frame=True, action_len=self._action_len
         )
 
         return {
             'pred_offsets': pred_offsets,
-            'coarse_trajs': coarse_trajs,
+            'coarse_local_trajs': coarse_local_trajs,
             'cluster_scores': cluster_scores,
         }
 
@@ -383,9 +383,9 @@ class VBD(pl.LightningModule):
         diff_valid_mask = diff_valid_mask.unsqueeze(-1) # [B, A_pred, T_future_steps, 1] 以便广播
 
         # B, A_pred, T_future_steps, 2
-        gt_future_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
+        gt_future_local_diff = torch.diff(gt_future_local[:, :, ::self._action_len, :], dim=-2)
 
-        gt_masked = gt_future_diff.unsqueeze(2) * diff_valid_mask.unsqueeze(2)
+        gt_masked = gt_future_local_diff.unsqueeze(2) * diff_valid_mask.unsqueeze(2)
         anchor_masked = self.anchor_diffs.unsqueeze(0).unsqueeze(0) * diff_valid_mask.unsqueeze(2)
         masked_diff = gt_masked - anchor_masked  # [B, A_pred, N, T_future_steps, 2]
         distances_sq = torch.sum(masked_diff**2, dim=[-1, -2]) # [B, A, 16384]
@@ -393,20 +393,20 @@ class VBD(pl.LightningModule):
         nearest_fine_anchor_indices = torch.argmin(distances_sq, dim=2) # [B, A]
 
         # gt_future_diff = gt_future_diff * diff_valid_mask.float()
-        # gt_future_diff_flat = gt_future_diff.reshape(B * self._agents_len, -1)
+        # gt_future_local_diff_flat = gt_future_local_diff.reshape(B * self._agents_len, -1)
 
-        # dists = torch.cdist(gt_future_diff_flat, self.anchor_diffs_flat) # [B*A, 16384]
+        # dists = torch.cdist(gt_future_local_diff_flat, self.anchor_diffs_flat) # [B*A, 16384]
         # nearest_fine_anchor_indices = torch.argmin(dists, dim=1)
 
         best_anchor_diff = self.anchor_diffs[nearest_fine_anchor_indices]  # B, A_pred, T_future_steps, 2
         target_cluster_indices = self.cluster_labels[nearest_fine_anchor_indices]
         target_cluster_center_diff = self.cluster_diffs[target_cluster_indices]  # B, A_pred, T_future_steps, 2
 
-        target_cluster_to_gt_diff_offset = gt_future_diff - target_cluster_center_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
-        target_anchor_to_gt_diff_offset = gt_future_diff - best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
+        target_cluster_to_gt_local_diff_offset = gt_future_local_diff - target_cluster_center_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
+        target_anchor_to_gt_local_diff_offset = gt_future_local_diff - best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
 
-        target_anchor_to_gt_diff_offset = target_anchor_to_gt_diff_offset * diff_valid_mask.float()
-        target_cluster_to_gt_diff_offset = target_cluster_to_gt_diff_offset * diff_valid_mask.float()
+        target_anchor_to_gt_local_diff_offset = target_anchor_to_gt_local_diff_offset * diff_valid_mask.float()
+        target_cluster_to_gt_local_diff_offset = target_cluster_to_gt_local_diff_offset * diff_valid_mask.float()
 
 
         ############### Behavior Prior Prediction #################
@@ -420,18 +420,18 @@ class VBD(pl.LightningModule):
 
             # get loss
             coarse_offsets = goal_outputs['pred_offsets'] # B, A_pred, T_future, 5
-            coarse_trajs = goal_outputs['coarse_trajs'] # B, A_pred, T_future, 5
+            coarse_local_trajs = goal_outputs['coarse_local_trajs'] # B, A_pred, T_future, 5
             cluster_scores = goal_outputs['cluster_scores'] # B, A_pred, num_clusters
 
             coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_offsets, cluster_scores, 
-                                              target_cluster_to_gt_diff_offset, target_cluster_indices,
+                                              target_cluster_to_gt_local_diff_offset, target_cluster_indices,
                                               diff_valid_mask, agents_interested)
 
             pred_loss = self.goal_loss_weight * coarse_traj_loss + self.score_loss_weight * cluster_score_loss
             total_loss += self.predictor_loss_weight * pred_loss
 
             pred_ade, pred_fde = self.calculate_metrics_predict(
-                coarse_trajs, agents_future, agents_future_valid, agents_interested, 8
+                coarse_local_trajs, gt_future_local, agents_future_valid, agents_interested, 8
             )
             # pred_ade, pred_fde = self.calculate_metrics_predict_new(
             #     goal_trajs, agents_future, agents_future_valid, agents_interested, 16
@@ -492,9 +492,9 @@ class VBD(pl.LightningModule):
 
             # noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
-            noise = torch.randn_like(target_anchor_to_gt_diff_offset) # B, A_pred, T_future_steps, 2
+            noise = torch.randn_like(target_anchor_to_gt_local_diff_offset) # B, A_pred, T_future_steps, 2
 
-            target_offset_norm = self.normalize_anchor_increments(target_anchor_to_gt_diff_offset)
+            target_offset_norm = self.normalize_anchor_increments(target_anchor_to_gt_local_diff_offset)
 
             noised_target_offset_norm = self.noise_scheduler.add_noise(
                 target_offset_norm,
@@ -519,11 +519,11 @@ class VBD(pl.LightningModule):
             debug_outputs['diffusion_steps'] = diffusion_steps
 
             # Get Loss
-            denoised_trajs = denoise_outputs['denoised_trajs']
+            denoised_local_trajs = denoise_outputs['denoised_local_trajs']
             denoised_offset = denoise_outputs['denoised_offset']
             if self._prediction_type == 'sample':
                 diff_loss = self.diff_loss(
-                    denoised_offset, target_anchor_to_gt_diff_offset, diff_valid_mask, agents_interested
+                    denoised_offset, target_anchor_to_gt_local_diff_offset, diff_valid_mask, agents_interested
                 )
                 total_loss += self.denoiser_loss_weight * (self.traj_loss_weight * diff_loss)
 
@@ -561,7 +561,7 @@ class VBD(pl.LightningModule):
                 #     pred_action_normalized, gt_actions_normalized, gt_actions_valid, agents_interested
                 # )
                 denoise_loss = self.traj_loss(
-                    denoised_trajs, agents_future, agents_future_valid, agents_interested
+                    denoised_local_trajs, agents_future, agents_future_valid, agents_interested
                 )
                 total_loss += (self.denoiser_loss_weight * self.denoise_loss_weight * denoise_loss)
                 # log_dict.update({
@@ -574,7 +574,7 @@ class VBD(pl.LightningModule):
                 raise ValueError('Invalid prediction type')
 
             denoise_ade, denoise_fde = self.calculate_metrics_denoise(
-                denoised_trajs, agents_future, agents_future_valid, agents_interested, 8
+                denoised_local_trajs, gt_future_local, agents_future_valid, agents_interested, 8
             )
 
             log_dict.update({
