@@ -50,10 +50,10 @@ class VBD(pl.LightningModule):
         self._task_probabilities = cfg.get('task_probabilities', None)
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
-        self.use_gumbel_anneal = cfg.get('use_gumbel_anneal', False)
-        self._gumbel_tau_start = cfg.get('gumbel_tau_start', 1.0)
-        self._gumbel_tau_end = cfg.get('gumbel_tau_end', 0.1)
-        self._gumbel_anneal_steps = cfg.get('gumbel_anneal_steps', 10000)
+        self.use_balanced_input = cfg.get('use_balanced_input', False)
+        self._weight_start = cfg.get('weight_start', 1.0)
+        self._weight_end = cfg.get('weight_end', 0.0)
+        self._weight_anneal_steps = cfg.get('weight_anneal_steps', 10000)
 
         self.score_loss_type = cfg.get('score_loss_type', 'bce')
         self.bce_loss_weight = cfg.get('bce_loss_weight', 0.5)
@@ -314,6 +314,7 @@ class VBD(pl.LightningModule):
 
         return {
             'pred_offsets': pred_offsets,
+            'coarse_diffs': coarse_diffs,
             'coarse_local_trajs': coarse_local_trajs,
             'cluster_scores': cluster_scores,
         }
@@ -403,9 +404,6 @@ class VBD(pl.LightningModule):
         target_cluster_center_diff = self.cluster_diffs[target_cluster_indices]  # B, A_pred, T_future_steps, 2
 
         target_cluster_to_gt_local_diff_offset = gt_future_local_diff - target_cluster_center_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
-        target_anchor_to_gt_local_diff_offset = gt_future_local_diff - best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim)  # B, A_pred, T_future_steps, 2
-
-        target_anchor_to_gt_local_diff_offset = target_anchor_to_gt_local_diff_offset * diff_valid_mask.float()
         target_cluster_to_gt_local_diff_offset = target_cluster_to_gt_local_diff_offset * diff_valid_mask.float()
 
 
@@ -420,6 +418,7 @@ class VBD(pl.LightningModule):
 
             # get loss
             coarse_offsets = goal_outputs['pred_offsets'] # B, A_pred, T_future, 5
+            coarse_diffs = goal_outputs['coarse_diffs']
             coarse_local_trajs = goal_outputs['coarse_local_trajs'] # B, A_pred, T_future, 5
             cluster_scores = goal_outputs['cluster_scores'] # B, A_pred, num_clusters
 
@@ -444,53 +443,20 @@ class VBD(pl.LightningModule):
                 prefix + 'pred_FDE': pred_fde,
             })
 
+        pred_coarse_diff = coarse_diffs.view(B, self._agents_len, -1, self.diff_dim)
+        balanced_diff_input = best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim) * self._input_weight + pred_coarse_diff * (1 - self._input_weight)
+        target_anchor_to_gt_local_diff_offset = gt_future_local_diff - balanced_diff_input  # B, A_pred, T_future_steps, 2
+        target_anchor_to_gt_local_diff_offset = target_anchor_to_gt_local_diff_offset * diff_valid_mask.float()
 
         ############### Denoise #################
         if self._train_denoiser:
             # get predicted anchor
             assert cluster_scores != None, 'No valid goal predictions yet.'
 
-            # Predicted anchor
-            # best_pred_anchor_idx = goal_scores.argmax(dim=-1)  # B, A_pred
-            # best_pred_anchor_diff = all_anchor_diff[
-            #     B_idx, A_idx, best_pred_anchor_idx
-            # ]  # B, A_pred, T_future_steps, 2
-
-            # # Use Gumbel-Softmax for differentiable sampling of anchors
-            # goal_one_hot = gumbel_softmax(goal_scores, tau=self._gumbel_tau, hard=True, dim=-1)
-
-            # # Introduce random exploration
-            # batch_index_mask = torch.rand(B, device=goal_scores.device) < self._random_target
-            # if batch_index_mask.any():
-            #     num_anchors = goal_scores.shape[-1]
-            #     random_indices = torch.randint(0, num_anchors, (B, self._agents_len), device=goal_scores.device)
-            #     random_one_hot = torch.nn.functional.one_hot(random_indices, num_classes=num_anchors).float()
-                
-            #     # Apply random selection only for masked batches
-            #     # Unsqueeze batch_index_mask to match dimensions for broadcasting
-            #     goal_one_hot = torch.where(batch_index_mask.unsqueeze(-1).unsqueeze(-1), random_one_hot, goal_one_hot)
-
-            # # Select anchors using the one-hot tensor
-            # # Reshape one-hot tensor to [B, A, num_anchors, 1, 1] for broadcasting
-            # selected_anchors_one_hot = goal_one_hot.unsqueeze(-1).unsqueeze(-1)
-            # # Multiply and sum to select the target anchors
-            # target_anchors_gt = (anchors * selected_anchors_one_hot).sum(dim=2)
-
-            # anchors_input = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # Calculate increments from anchors
-
             diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps * 1 // 50, (B,),
+                1, self.noise_scheduler.num_steps * 1 // 20, (B,),
                 device=agents_future.device
             ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) # B, A_pred, 1, 1
-
-            # random_diffusion_steps = torch.randint(
-            #     1, self.noise_scheduler.num_steps * 3 // 40, (B,),
-            #     device=agents_future.device
-            # ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) + self.noise_scheduler.num_steps // 40
-
-            # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
-
-            # noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
 
             noise = torch.randn_like(target_anchor_to_gt_local_diff_offset) # B, A_pred, T_future_steps, 2
 
@@ -511,7 +477,7 @@ class VBD(pl.LightningModule):
                                                      best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
-            # denoise_outputs['denoised_trajs']: B, A_pred, T_future, 5
+            # denoise_outputs['denoised_local_trajs']: B, A_pred, T_future, 5
             # denoise_outputs['denoised_trajs_origin']: B, A_pred, T_future, 5
 
             debug_outputs.update(denoise_outputs)
@@ -582,7 +548,7 @@ class VBD(pl.LightningModule):
                 prefix + 'denoise_FDE': denoise_fde,
             })
 
-        log_dict['gumbel_tau'] = self._gumbel_tau
+        log_dict['input_weight'] = self._input_weight
         log_dict['rank_weight'] = self.rank_loss_weight
         log_dict[prefix + 'loss'] = total_loss.item()
 
@@ -613,16 +579,16 @@ class VBD(pl.LightningModule):
 
         global_step = self.global_step
 
-        if self.use_gumbel_anneal:
-            if global_step >= self._gumbel_anneal_steps // self.accumulate_grad_batches:
-                self._gumbel_tau = self._gumbel_tau_end
+        if self.use_balanced_input:
+            if global_step >= self._weight_anneal_steps // self.accumulate_grad_batches:
+                self._input_weight = self._weight_end
             else:
-                tau_decay = (self._gumbel_tau_start - self._gumbel_tau_end) * (
-                    1 - global_step / (self._gumbel_anneal_steps // self.accumulate_grad_batches)
+                weight_decay = (self._weight_start - self._weight_end) * (
+                    1 - global_step / (self._weight_anneal_steps // self.accumulate_grad_batches)
                 )
-                self._gumbel_tau = self._gumbel_tau_end + tau_decay
+                self._input_weight = self._weight_end + weight_decay
         else:
-            self._gumbel_tau = self._gumbel_tau_end
+            self._input_weight = self._weight_end
 
         if self.use_dynamic_rank_weight:
             if global_step < self.rank_weight_anneal_steps // self.accumulate_grad_batches:
