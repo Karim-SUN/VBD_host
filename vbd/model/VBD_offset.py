@@ -301,13 +301,17 @@ class VBD(pl.LightningModule):
         # Predict offset
         pred_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command, target_cluster_center_diffs)
 
+        # 构造掩码 [B, A, 1, 1]
+        is_conditioned = (intent_command != 0).float().unsqueeze(-1).unsqueeze(-1)
+        masked_prior = target_cluster_center_diffs * is_conditioned
+
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
         current_states = encoder_outputs['agents_local'][:, :self._agents_len, T_history_and_cur - 1]
         assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
-        coarse_diffs = pred_offsets + target_cluster_center_diffs
+        coarse_diffs = pred_offsets + masked_prior
         coarse_local_trajs, _ = roll_out_new(
             current_states, coarse_diffs, global_frame=True, action_len=self._action_len
         )
@@ -422,8 +426,8 @@ class VBD(pl.LightningModule):
             coarse_local_trajs = goal_outputs['coarse_local_trajs'] # B, A_pred, T_future, 5
             cluster_scores = goal_outputs['cluster_scores'] # B, A_pred, num_clusters
 
-            coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_offsets, cluster_scores, 
-                                              target_cluster_to_gt_local_diff_offset, target_cluster_indices,
+            coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_diffs, cluster_scores, 
+                                              gt_future_local_diff, target_cluster_indices,
                                               diff_valid_mask, agents_interested)
 
             pred_loss = self.goal_loss_weight * coarse_traj_loss + self.score_loss_weight * cluster_score_loss
@@ -774,78 +778,64 @@ class VBD(pl.LightningModule):
         return diff_loss_mean
 
     def goal_loss(
-            self, coarse_offsets, cluster_scores, target_offsets, target_indices,
+            self, coarse_diffs, cluster_scores, gt_diffs, target_indices,
             diff_valid_mask, agents_interested
     ):
         """
-        Calculates the loss for trajectory prediction.
-        Supports BCE, Plackett-Luce (rank), and a mix of both for the score loss.
+        Calculates the loss for trajectory prediction (IntentConditioner).
+        
+        Updated for CFG: Now calculates regression loss on 'coarse_diffs' (absolute) 
+        against 'gt_diffs' (absolute), ensuring consistent objectives for both 
+        conditional and unconditional passes.
 
         Args:
-            trajs (torch.Tensor): Predicted trajectories from GoalPredictor, shape [B, A_pred, Q, T_future, 5].
-            scores (torch.Tensor): Predicted scores (logits) for anchors, shape [B, A_pred, Q].
-            agents_future (torch.Tensor): Ground truth future agent states, shape [B, A_pred, T_future_and_cur, 5].
-            agents_future_valid (torch.Tensor): Validity of future states, shape [B, A_pred, T_future_and_cur].
-            agents_interested (torch.Tensor): Interest in agents, shape [B, A_pred].
-            cluster_gts (torch.Tensor): Ground truth cluster indices for each agent, shape [B, A_pred].
+            coarse_diffs (torch.Tensor): Predicted absolute trajectory differences, shape [B, A_pred, T_future, 2].
+            cluster_scores (torch.Tensor): Predicted cluster scores (logits), shape [B, A_pred, num_clusters].
+            gt_diffs (torch.Tensor): Ground truth absolute trajectory differences, shape [B, A_pred, T_future, 2].
+            target_indices (torch.Tensor): Ground truth cluster indices, shape [B, A_pred].
+            diff_valid_mask (torch.Tensor): Validity mask for diffs, shape [B, A_pred, T_future, 1].
+            agents_interested (torch.Tensor): Interest mask, shape [B, A_pred].
 
         Returns:
-            traj_loss_mean (torch.Tensor): Mean regression loss for the best predicted trajectory.
+            traj_loss_mean (torch.Tensor): Mean regression loss.
             score_loss_mean (torch.Tensor): Mean score loss.
-            gt_ranking (torch.Tensor): Ground truth ranking of anchors based on ADE, shape [B * A_pred, Q].
-            ade (torch.Tensor): ADE for each anchor, shape [B * A_pred, Q].
         """
         agents_interested_flat = agents_interested.flatten().float()  # [B * A_pred]
 
-        # --- Calculate Score Loss based on configured type ---
+        # --- 1. Calculate Score Loss (Classification) ---
         score_loss = 0.0
-        num_batch, num_agents, num_timesteps_future, _ = coarse_offsets.shape
         num_query = cluster_scores.shape[-1]
 
-        # BCE Loss Calculation
+        # BCE Loss Calculation (Supports 'bce' or 'mix')
         if self.score_loss_type in ['bce', 'mix']:
             bce_target = torch.nn.functional.one_hot(target_indices, num_classes=num_query).float()
+            # Multi-label BCE (though here it's single label target)
             bce_loss = binary_cross_entropy_with_logits(cluster_scores, bce_target, reduction='none').sum(dim=-1)
             score_loss += self.bce_loss_weight * bce_loss.view(-1)  # [B * A_pred]
 
-        # # Rank Loss (Plackett-Luce) Calculation
-        # if self.score_loss_type in ['rank', 'mix']:
-        #     ranked_scores = torch.gather(scores_flat, 1, gt_ranking)
-        #     log_denominators = torch.logcumsumexp(ranked_scores.flip(1), dim=1).flip(1)
-        #     pl_log_probs = ranked_scores - log_denominators
-
-        #     if self.use_focused_rank_loss:
-        #         rank_topk_mask = torch.zeros_like(pl_log_probs)
-        #         rank_topk_mask[:, :self.focused_rank_topk] = 1.0
-        #         pl_log_probs = pl_log_probs * rank_topk_mask
-
-        #     rank_loss = -pl_log_probs.sum(dim=-1)
-
-        #     # Soft Contrastive Hinge Loss
-        #     if self.use_hinge_loss:
-        #         worst_topk_idx = gt_ranking[:, self.focused_rank_topk - 1]
-        #         best_bottomk_idx = gt_ranking[:, -self.focused_rank_topk]
-        #         worst_topk_scores = torch.gather(scores_flat, 1, worst_topk_idx.unsqueeze(-1)).squeeze(-1)
-        #         best_bottomk_scores = torch.gather(scores_flat, 1, best_bottomk_idx.unsqueeze(-1)).squeeze(-1)
-        #         score_diff_logits = worst_topk_scores - best_bottomk_scores
-        #         target = torch.ones_like(score_diff_logits)
-        #         soft_hinge_loss = binary_cross_entropy_with_logits(
-        #             score_diff_logits, target, reduction='none').sum(dim=-1)
-        #         rank_loss += self.soft_hinge_loss_weight * soft_hinge_loss
-
-        #     score_loss += self.rank_loss_weight * rank_loss
-
-        # Average the loss over valid agents
+        # (Rank/Hinge loss logic removed/commented out as standard CrossEntropy/BCE is usually sufficient for intent classification)
+        
+        # Average the score loss over valid agents
         score_loss = score_loss * (agents_interested_flat > 0).float()
         score_loss_mean = score_loss.sum() / torch.clamp((agents_interested_flat > 0).sum(), min=1.0)
 
-        # --- 3. Calculate regression loss for the best *predicted* trajectory ---
-        traj_loss = smooth_l1_loss(coarse_offsets, target_offsets, reduction='none').sum(-1)
-        valid_mask = diff_valid_mask.squeeze(-1) * (agents_interested.unsqueeze(-1) > 0)  # [B, A_pred, T_future_steps]
+        # --- 2. Calculate Regression Loss (Absolute Diffs) ---
+        # Direct L1 loss between predicted absolute diffs and GT absolute diffs.
+        # This works for both:
+        #   - Conditional case: (Pred_Offset + Cluster) approx GT
+        #   - Unconditional case: (Pred_Offset + 0) approx GT
+        
+        traj_loss = smooth_l1_loss(coarse_diffs, gt_diffs, reduction='none').sum(-1) # [B, A, T]
+        
+        # Combine masks: Trajectory Validity AND Agent Interest
+        # diff_valid_mask: [B, A, T, 1] -> squeeze -> [B, A, T]
+        # agents_interested: [B, A] -> unsqueeze -> [B, A, 1]
+        valid_mask = diff_valid_mask.squeeze(-1) * (agents_interested.unsqueeze(-1) > 0)
+        
         traj_loss = traj_loss * valid_mask.float()
         traj_loss_mean = traj_loss.sum() / torch.clamp(valid_mask.sum(), min=1.0)
 
-        # --- 4. Return losses ---
+        # --- 3. Return losses ---
         return traj_loss_mean, score_loss_mean
 
     @torch.no_grad()
