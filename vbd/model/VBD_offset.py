@@ -50,7 +50,7 @@ class VBD(pl.LightningModule):
         self._task_probabilities = cfg.get('task_probabilities', None)
         self.anchor_incre_min = cfg['anchor_incre_min']
         self.anchor_incre_max = cfg['anchor_incre_max']
-        self.use_balanced_input = cfg.get('use_balanced_input', False)
+        self._balanced_input = cfg.get('balanced_input', 'prob')
         self._weight_start = cfg.get('weight_start', 1.0)
         self._weight_end = cfg.get('weight_end', 0.0)
         self._weight_anneal_steps = cfg.get('weight_anneal_steps', 10000)
@@ -443,8 +443,32 @@ class VBD(pl.LightningModule):
                 prefix + 'pred_FDE': pred_fde,
             })
 
+        ################### 采样 (Scheduled Sampling) ###################
         pred_coarse_diff = coarse_diffs.view(B, self._agents_len, -1, self.diff_dim)
-        balanced_diff_input = best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim) * self._input_weight + pred_coarse_diff * (1 - self._input_weight)
+
+        if self._balanced_input == 'prob':
+            # 2. 生成 Per-Agent 随机掩码 [B, A_pred]
+            #    True = 使用真值锚点, False = 使用预测轨迹
+            use_anchor_mask = torch.rand(B, self._agents_len, device=self.device) < self._input_weight
+            
+            #    调整形状以广播: [B, A, 1, 1]
+            use_anchor_mask = use_anchor_mask.view(B, self._agents_len, 1, 1)
+
+            # 3. 准备候选项
+            #    Candidate A: 真值最佳锚点 (训练初期目标)
+            candidate_anchor = best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim)
+            
+            #    Candidate B: Predictor 预测出的粗略轨迹
+            #    [重要] 必须 .detach()，防止 Denoiser "教" Predictor 作弊
+            candidate_pred = coarse_diffs.view(B, self._agents_len, -1, self.diff_dim).detach()
+
+            # 4. 执行采样 (物理上真实存在的轨迹，而不是平均值)
+            #    balanced_diff_input 现在是 "Base" (基准轨迹)
+            balanced_diff_input = torch.where(use_anchor_mask, candidate_anchor, candidate_pred)
+
+        elif self._balanced_input == 'linear':
+            balanced_diff_input = best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim) * self._input_weight + pred_coarse_diff * (1 - self._input_weight)
+
         target_anchor_to_gt_local_diff_offset = gt_future_local_diff - balanced_diff_input  # B, A_pred, T_future_steps, 2
         target_anchor_to_gt_local_diff_offset = target_anchor_to_gt_local_diff_offset * diff_valid_mask.float()
 
@@ -454,9 +478,10 @@ class VBD(pl.LightningModule):
             assert cluster_scores != None, 'No valid goal predictions yet.'
 
             diffusion_steps = torch.randint(
-                1, self.noise_scheduler.num_steps * 1 // 20, (B,),
+                1, self.noise_scheduler.num_steps * 1 // 20, (B, self._agents_len),
                 device=agents_future.device
-            ).long().unsqueeze(-1).repeat(1, self._agents_len).view(B, self._agents_len, 1, 1) # B, A_pred, 1, 1
+            ).long()
+            diffusion_steps = diffusion_steps.view(B, self._agents_len, 1, 1)
 
             noise = torch.randn_like(target_anchor_to_gt_local_diff_offset) # B, A_pred, T_future_steps, 2
 
@@ -579,7 +604,7 @@ class VBD(pl.LightningModule):
 
         global_step = self.global_step
 
-        if self.use_balanced_input:
+        if self._balanced_input != 'no':
             if global_step >= self._weight_anneal_steps // self.accumulate_grad_batches:
                 self._input_weight = self._weight_end
             else:

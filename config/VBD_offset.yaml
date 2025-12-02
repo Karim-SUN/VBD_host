@@ -40,7 +40,9 @@ task_probabilities:
 # Predictor
 prediction_type: sample
 encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
-use_balanced_input: True
+
+# Weight Annealing
+balanced_input: prob # 'no', 'prob', 'linear'
 weight_start: 1.0
 weight_end: 0.0
 weight_anneal_steps: 4400
