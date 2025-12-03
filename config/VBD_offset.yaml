@@ -1,12 +1,10 @@
 model_name: VBD
 
 # Data Config
+train_data_path: /media/huang/PortableSSD/train_processed/processed
+# train_data_path: /media/huang/0CB911D80CB911D8/train_processed/processed
 # train_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/train/processed
-# val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
-# anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
-# log_dir: ./train_log
-train_data_path: /home/karim/VBD/data/train
-val_data_path: /home/karim/VBD/data/val
+val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
 anchor_path: vbd/data/16384.npy
 cluster_path: vbd/data/clusters_nms.pkl
 log_dir: ./train_log
@@ -27,7 +25,7 @@ action_len: 1
 encoder_layers: 6
 
 # Encoder
-history_dropout: 0.2
+history_dropout: 0.4
 
 # Task Probabilities for get_random_mask
 intent_dropout: 0.25
@@ -43,7 +41,7 @@ encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 use_balanced_input: True
 weight_start: 1.0
 weight_end: 0.0
-weight_anneal_steps: 4400
+weight_anneal_steps: 70000
 
 # Diffusion Params
 diffusion_steps: 1000
@@ -64,14 +62,14 @@ anchor_incre_max: [7, 2]
 
 # Training Params
 seed: 21
-batch_size: 2
-num_workers: 20
-accumulate_grad_batches: 1 # 会影响实际的lr steps等
+batch_size: 10
+num_workers: 32
+accumulate_grad_batches: 4 # 会影响实际的lr steps等
 lr: 0.0002 # 0.0002
 weight_decay: 0.01
-epochs: 12
-lr_warmup_step: 600
-lr_total_steps: 4800 # 估算的总训练步数 (例如: epochs * steps/epoch)
+epochs: 8
+lr_warmup_step: 7000
+lr_total_steps: 77936 # 估算的总训练步数 (例如: epochs * steps/epoch)
 lr_end_factor: 0.025 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 precision: "bf16-mixed"
 random_target: 0.1
@@ -81,7 +79,7 @@ score_loss_type: "bce" # 'bce', 'rank', or 'mix'
 use_dynamic_rank_weight: True
 rank_weight_start: 0.0
 rank_weight_end: 0.1
-rank_weight_anneal_steps: 4800
+rank_weight_anneal_steps: 20000
 
 use_focused_rank_loss: True
 focused_rank_topk: 5
@@ -89,11 +87,11 @@ use_hinge_loss: False
 soft_hinge_loss_weight: 0.1
 
 bce_loss_weight: 1.0
-goal_loss_weight: 50.0
-score_loss_weight: 0.05
+goal_loss_weight: 100.0
+score_loss_weight: 0.5
 predictor_loss_weight: 1.0
 
-traj_loss_weight: 0.4
+traj_loss_weight: 2.0
 denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 
