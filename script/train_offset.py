@@ -12,8 +12,6 @@ import jax
 jax.config.update("jax_platform_name", "cpu")
 
 from vbd.data.dataset import WaymaxDataset
-# from vbd.model.VBD import VBD
-# from vbd.model.VBD_new import VBD
 from vbd.model.VBD_offset import VBD
 from torch.utils.data import DataLoader
 

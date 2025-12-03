@@ -116,10 +116,13 @@ class IntentConditioner(nn.Module):
 
         self.num_diff_steps = (future_len // action_len)
         self.diff_dim = diff_dim
-        
-        # 2. 意图嵌入层 (并行输入)
-        # +1 是为 CFG 的 NULL 意图 (e.g., 索引 0) 
+         
+        # 1. [Query] 意图嵌入 (用于 Query_Offset)
+        # +1 是为 CFG 的 NULL 意图 (e.g., 索引 0)
         self.cluster_embed = nn.Embedding(num_clusters + 1, d_model)
+        
+        # 2. [Query] 探测嵌入 (用于 Query_Score)
+        self.predict_probe_embed = nn.Parameter(torch.randn(1, 1, d_model))
 
         # 3. [新] 锚点轨迹先验编码器 (将 [40, 2] 编码为 d_model)
         #    使用一个简单的 MLP 将扁平化的轨迹编码
@@ -130,9 +133,16 @@ class IntentConditioner(nn.Module):
         )
         self.null_anchor_embedding = nn.Parameter(torch.randn(1, 1, d_model))
 
-        # 4. 融合层 (重用现有的 CrossTransformer)
-        self.attention_layers = nn.ModuleList([CrossTransformer() for _ in range(4)])
+        # # 4. 融合层 (重用现有的 CrossTransformer)
+        # self.attention_layers = nn.ModuleList([CrossTransformer() for _ in range(4)])
         
+        # 4. [架构升级] Transformer Decoder 层
+        #    注意: 我们需要 Self-Attention 来实现非对称交互
+        self.layers = nn.ModuleList([
+            RelationTransformerDecoderLayer(d_model=d_model, nhead=8, dropout=0.1)
+            for _ in range(4)
+        ])
+
         # 5. 输出头 (回归偏移量)
         self.offset_decoder = nn.Sequential(
             nn.Linear(d_model, d_model * 2),
@@ -155,6 +165,90 @@ class IntentConditioner(nn.Module):
         )
 
     def forward(self, encoder_outputs, intent_command, target_cluster_center_diffs):
+        """
+        Args:
+            encoder_outputs (dict): 来自 Encoder 的输出.
+            intent_command (torch.Tensor): 形状为 [B, A_pred] 的意图簇索引 (long).
+            target_cluster_center_diffs (torch.Tensor): 形状为 [B, A_pred, T_diff, D_diff] 的簇中心轨迹.
+        Returns:
+            torch.Tensor: 预测的粗略偏移量, 形状 [B, A_pred, T_diff, D_diff].
+        """
+        encodings = encoder_outputs['encodings']
+        relations = encoder_outputs['relation_encodings']
+        mask = torch.cat([encoder_outputs['agents_mask'], 
+                          encoder_outputs['maps_mask'],
+                          encoder_outputs['traffic_lights_mask']], dim=-1)
+        
+        B, N, D = encodings.shape
+        A = self._agents_len
+
+        # --- 1. 准备 Query Stack (与之前相同) ---
+        # [B, A, D]
+        q_score = self.predict_probe_embed.expand(B, A, -1)
+        
+        intent_embedding = self.cluster_embed(intent_command)
+        flat_anchor_diffs = target_cluster_center_diffs.flatten(2)
+        anchor_traj_embedding = self.anchor_traj_encoder(flat_anchor_diffs)
+        
+        null_mask = (intent_command == 0).unsqueeze(-1)
+        anchor_traj_embedding = torch.where(null_mask, self.null_anchor_embedding, anchor_traj_embedding)
+        
+        # [B, A, D]
+        q_offset = intent_embedding + anchor_traj_embedding 
+
+        # 拼接: [B, A, 2, D]
+        query_stack = torch.stack([q_score, q_offset], dim=2)
+
+        # --- 2. [关键] 数据重塑与广播 (Batch Flattening) ---
+        # 目标: 将 [B, A] 合并为 [B*A]
+        
+        # Query: [B, A, 2, D] -> [B*A, 2, D]
+        tgt = query_stack.view(B * A, 2, D)
+        
+        # Memory (Scene): [B, N, D] -> [B, 1, N, D] -> [B, A, N, D] -> [B*A, N, D]
+        memory = encodings.unsqueeze(1).expand(-1, A, -1, -1).reshape(B * A, N, D)
+        
+        # Mask: [B, N] -> [B*A, N]
+        memory_mask = mask.unsqueeze(1).expand(-1, A, -1).reshape(B * A, N)
+        
+        # Relations: [B, N, N, D] 
+        # 我们需要每个 Agent (前 A 个) 与整个场景 (N) 的关系
+        # Slice: [B, A, N, D] -> Flatten: [B*A, N, D]
+        # 假设 relations 的前 A 行对应我们要预测的 agents
+        rel_slice = relations[:, :A, :, :] 
+        rel_flat = rel_slice.reshape(B * A, N, D)
+
+        # 非对称掩码: [2, 2]
+        tgt_mask = torch.tensor([[0., -float('inf')], 
+                                 [0., 0.]]).to(encodings.device)
+
+        # --- 3. 并行前向传播 ---
+        # 现在所有数据都是 [Batch_Size', ...]，可以直接通过 Layer
+        for layer in self.layers:
+            tgt = layer(
+                tgt=tgt, 
+                memory=memory, 
+                relations=rel_flat, # [B*A, N, D]
+                tgt_mask=tgt_mask, 
+                memory_key_padding_mask=memory_mask
+            )
+
+        # --- 4. 恢复形状与解码 ---
+        # tgt: [B*A, 2, D] -> [B, A, 2, D]
+        tgt = tgt.view(B, A, 2, D)
+        
+        out_score = tgt[:, :, 0] # [B, A, D]
+        out_offset = tgt[:, :, 1] # [B, A, D]
+        
+        # Heads
+        coarse_offsets = self.offset_decoder(out_offset) # [B, A, T*2]
+        coarse_offsets = coarse_offsets.view(B, A, self.num_diff_steps, self.diff_dim)
+        
+        cluster_scores = self.score_decoder(out_score) # [B, A, K]
+
+        return coarse_offsets, cluster_scores
+
+    def forward_old(self, encoder_outputs, intent_command, target_cluster_center_diffs):
         """
         Args:
             encoder_outputs (dict): 来自 Encoder 的输出.
@@ -387,6 +481,68 @@ class TrafficLightEncoder(nn.Module):
         output = type_embed
 
         return output
+
+
+class RelationTransformerDecoderLayer(nn.Module):
+    def __init__(self, d_model=256, nhead=8, dim_feedforward=1024, dropout=0.1):
+        super().__init__()
+        
+        # 1. Self-Attention (Query 内部交互)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+
+        # 2. Cross-Attention (Query <-> Scene 交互)
+        #    这里我们不使用 nn.MultiheadAttention，而是使用支持 relation 的逻辑
+        #    (复用 CrossTransformer 的核心逻辑，或者手动写 Attention)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+        # 3. Feed Forward
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout3 = nn.Dropout(dropout)
+        self.activation = nn.functional.gelu
+
+    def forward(self, tgt, memory, relations, tgt_mask=None, memory_key_padding_mask=None):
+        """
+        Args:
+            tgt: [B*A, L_query, D] (Query)
+            memory: [B*A, N_scene, D] (Key/Value, 已重复扩展)
+            relations: [B*A, N_scene, D] (Spatial Relations, 已切片并展平)
+        """
+        # --- A. Self-Attention ---
+        # tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)[0] 
+        # (注意: 这里的 tgt_mask 是非对称掩码)
+        tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask, key_padding_mask=None)[0]
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
+
+        # --- B. Relation-Aware Cross-Attention ---
+        # [关键步骤] 将关系编码注入 Key
+        # memory: [B*A, N, D], relations: [B*A, N, D]
+        # 这里的加法实现了你 CrossTransformer 中的 `key = key + relations` 逻辑
+        key_with_relation = memory + relations 
+        
+        # Query = tgt, Key = key_with_relation, Value = memory (通常 Value 不加 relation，或者也可以加)
+        # 根据 modules_offset.py 第 249 行: value = key (即 value 也加了 relation)
+        value_with_relation = key_with_relation 
+
+        tgt2 = self.cross_attn(query=tgt, key=key_with_relation, value=value_with_relation, 
+                               key_padding_mask=memory_key_padding_mask)[0]
+        
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
+
+        # --- C. FFN ---
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
+        
+        return tgt
 
 
 class QCMHA(nn.Module):
