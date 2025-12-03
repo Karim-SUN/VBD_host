@@ -189,6 +189,10 @@ class VBD(pl.LightningModule):
         anchors_xy = anchors_traj[..., :2]  # [N, 41, 2]
         anchors_fine_grained_diffs = np.diff(anchors_xy, axis=1).astype(np.float32)  # [N, 40, 2]
 
+        # 计算全局平均差分 (Global Mean) [B=1, 40, 2]
+        global_mean_diff = np.mean(anchors_fine_grained_diffs, axis=0)
+        self.register_buffer('global_mean_diff', torch.from_numpy(global_mean_diff).unsqueeze(0))
+
         self.num_anchors, self.num_diff_steps, self.diff_dim = anchors_fine_grained_diffs.shape
 
         anchor_diffs_flat = anchors_fine_grained_diffs.reshape(
@@ -218,6 +222,34 @@ class VBD(pl.LightningModule):
         self.register_buffer('cluster_diffs', torch.from_numpy(cluster_center_diffs).cuda())
         self.register_buffer('anchor_diffs_flat', torch.from_numpy(anchor_diffs_flat).cuda())
         self.register_buffer('cluster_labels', torch.from_numpy(cluster_labels).cuda())
+
+        # ------------------- 新增：计算双重尺度统计量 -------------------
+        
+        # A. 计算 "无条件" 标准差 (std_uncond)
+        #    即: 所有锚点相对于全局平均值的标准差
+        #    Shape: [1, 40, 2]
+        std_uncond = np.std(anchors_fine_grained_diffs - global_mean_diff, axis=0)
+        # 防止除以0
+        std_uncond[std_uncond < 1e-4] = 1.0
+        
+        # B. 计算 "有条件" 标准差 (std_cond)
+        #    即: 每个锚点相对于它所属簇中心的标准差的平均值
+        #    这是一个近似值，但足够有效。
+        #    方法: 遍历所有簇，计算簇内方差，然后求平均。
+        
+        # 为了高效，我们可以直接计算 (Anchor - Cluster_Center) 的全局标准差
+        # 获取每个锚点对应的簇中心
+        anchor_cluster_centers = cluster_center_diffs[cluster_labels] # [N, 40, 2]
+        anchor_residuals = anchors_fine_grained_diffs - anchor_cluster_centers
+        
+        std_cond = np.std(anchor_residuals, axis=0) # [40, 2]
+        std_cond[std_cond < 1e-4] = 1.0
+
+        print(f"Scale Analysis - Uncond Std Mean: {std_uncond.mean():.4f}, Cond Std Mean: {std_cond.mean():.4f}")
+
+        self.register_buffer('std_uncond', torch.from_numpy(std_uncond).unsqueeze(0))
+        self.register_buffer('std_cond', torch.from_numpy(std_cond).unsqueeze(0))
+        # ----------------------------------------------------------------
 
 
     def forward(self, inputs, noised_actions_normalized, diffusion_step):
@@ -298,12 +330,32 @@ class VBD(pl.LightningModule):
         Returns:
             predictor_outputs: Dictionary containing the predictor outputs.
         """
+        # Normalize target cluster center diffs
+        target_cluster_center_diffs_norm = (target_cluster_center_diffs - self.global_mean_diff) / self.std_uncond
+
         # Predict offset
-        pred_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command, target_cluster_center_diffs)
+        pred_norm_offsets, cluster_scores = self.predictor(encoder_outputs, intent_command, target_cluster_center_diffs_norm)
 
         # 构造掩码 [B, A, 1, 1]
         is_conditioned = (intent_command != 0).float().unsqueeze(-1).unsqueeze(-1)
-        masked_prior = target_cluster_center_diffs * is_conditioned
+
+        # 选择对应的标准差
+        # 有条件 -> std_cond; 无条件 -> std_uncond
+        # [B, A, 40, 2]
+        # selected_std = (self.std_cond * is_conditioned) + \
+        #                (self.std_uncond * (1.0 - is_conditioned))
+        
+        # 反归一化：将网络输出还原为物理尺度
+        pred_offsets = pred_norm_offsets * self.std_uncond
+
+        # 有条件 -> 簇中心; 无条件 -> 全局平均
+        batch_mean_prior = self.global_mean_diff.expand_as(target_cluster_center_diffs)
+        
+        selected_prior = (target_cluster_center_diffs * is_conditioned) + \
+                         (batch_mean_prior * (1.0 - is_conditioned))
+        
+        # 重建局部绝对差分
+        coarse_diffs = pred_offsets + selected_prior
 
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
@@ -311,16 +363,18 @@ class VBD(pl.LightningModule):
         assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
-        coarse_diffs = pred_offsets + masked_prior
         coarse_local_trajs, _ = roll_out_new(
             current_states, coarse_diffs, global_frame=True, action_len=self._action_len
         )
 
         return {
             'pred_offsets': pred_offsets,
+            'pred_norm_offsets': pred_norm_offsets,
             'coarse_diffs': coarse_diffs,
             'coarse_local_trajs': coarse_local_trajs,
             'cluster_scores': cluster_scores,
+            'selected_std': self.std_uncond,
+            'selected_prior': selected_prior,
         }
 
     def forward_and_get_loss(self, batch, prefix='', debug=False):
@@ -422,12 +476,19 @@ class VBD(pl.LightningModule):
 
             # get loss
             coarse_offsets = goal_outputs['pred_offsets'] # B, A_pred, T_future, 5
+            coarse_norm_offsets = goal_outputs['pred_norm_offsets'] # B, A_pred, T_future, 5
             coarse_diffs = goal_outputs['coarse_diffs']
             coarse_local_trajs = goal_outputs['coarse_local_trajs'] # B, A_pred, T_future, 5
             cluster_scores = goal_outputs['cluster_scores'] # B, A_pred, num_clusters
+            selected_std = goal_outputs['selected_std']
+            selected_prior = goal_outputs['selected_prior']
 
-            coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_diffs, cluster_scores, 
-                                              gt_future_local_diff, target_cluster_indices,
+            target_offset = (gt_future_local_diff - selected_prior) * diff_valid_mask.float()
+            target_norm_offset = target_offset / selected_std
+            target_norm_offset = torch.clamp(target_norm_offset, min=-5.0, max=5.0)
+
+            coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_norm_offsets, cluster_scores, 
+                                              target_norm_offset, target_cluster_indices,
                                               diff_valid_mask, agents_interested)
 
             pred_loss = self.goal_loss_weight * coarse_traj_loss + self.score_loss_weight * cluster_score_loss

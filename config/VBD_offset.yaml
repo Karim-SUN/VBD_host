@@ -30,7 +30,7 @@ history_dropout: 0.4
 # Task Probabilities for get_random_mask
 intent_dropout: 0.25
 task_probabilities:
-  prediction: 0.8
+  prediction: 1.0
   goal_conditioned: 0.08
   agent_reactive: 0.08
   reconstruction: 0.04
@@ -59,8 +59,8 @@ action_std: [1.0, 1.0]
 clamp_value: 5.0
 
 normalize_anchors: True
-anchor_incre_min: [-0.2, -2]
-anchor_incre_max: [7, 2]
+anchor_incre_min: [-0.5, -2]
+anchor_incre_max: [3.5, 2]
 
 # Training Params
 seed: 21
@@ -89,11 +89,11 @@ use_hinge_loss: False
 soft_hinge_loss_weight: 0.1
 
 bce_loss_weight: 1.0
-goal_loss_weight: 100.0
-score_loss_weight: 0.5
+goal_loss_weight: 8
+score_loss_weight: 0.8
 predictor_loss_weight: 1.0
 
-traj_loss_weight: 2.0
+traj_loss_weight: 25.0
 denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 

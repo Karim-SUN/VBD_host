@@ -219,6 +219,8 @@ class IntentConditioner(nn.Module):
         rel_flat = rel_slice.reshape(B * A, N, D)
 
         # 非对称掩码: [2, 2]
+        # tgt_mask = torch.tensor([[0., -float('inf')], 
+        #                          [0., 0.]]).to(encodings.device)
         tgt_mask = torch.tensor([[0., -float('inf')], 
                                  [0., 0.]]).to(encodings.device)
 
