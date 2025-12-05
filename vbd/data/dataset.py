@@ -107,7 +107,7 @@ class WaymaxTestDataset(WaymaxDataset):
     def __init__(
         self,
         data_dir: str,
-        anchor_path = "data/cluster_64_center_dict.pkl",
+        anchor_path = "vbd/data/kmeans_navsim_traj_20.npy",
         max_object: int = 16,
         max_map_points: int = 3000,
         max_polylines: int = 256,

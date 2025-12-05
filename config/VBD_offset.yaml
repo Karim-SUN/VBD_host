@@ -28,7 +28,7 @@ encoder_layers: 6
 history_dropout: 0.4
 
 # Task Probabilities for get_random_mask
-intent_dropout: 0.25
+intent_dropout: 0.4
 task_probabilities:
   prediction: 1.0
   goal_conditioned: 0.08
@@ -41,7 +41,7 @@ encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 
 # Weight Annealing
 balanced_input: prob # 'no', 'prob', 'linear'
-weight_start: 1.0
+weight_start: 0.8
 weight_end: 0.0
 weight_anneal_steps: 70000
 
@@ -88,12 +88,12 @@ focused_rank_topk: 5
 use_hinge_loss: False
 soft_hinge_loss_weight: 0.1
 
-bce_loss_weight: 1.0
-goal_loss_weight: 8
+bce_loss_weight: 0.5
+goal_loss_weight: 15
 score_loss_weight: 0.8
 predictor_loss_weight: 1.0
 
-traj_loss_weight: 25.0
+traj_loss_weight: 80.0
 denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 

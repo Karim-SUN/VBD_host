@@ -59,8 +59,8 @@ env = WaymaxEnvironment(
 
 dataset = WaymaxTestDataset(
     data_dir=None,
-    anchor_path='vbd/data/cluster_64_center_dict.pkl',
-    max_object=N_SIM_AGENTS
+    # anchor_path='vbd/data/cluster_64_center_dict.pkl',
+    # max_object=N_SIM_AGENTS
 )
 
 
@@ -151,16 +151,13 @@ def run_simulation(args):
 
                     if args.test_mode == 'diffusion':
                         pred = vbd.sample_denoiser(batch)
-                        pred_traj = pred['denoised_trajs'].cpu().numpy()[0]
+                        pred_traj = pred['denoised_global_trajs'].cpu().numpy()[0]
 
                     elif args.test_mode == 'prior':
-                        pred = vbd.inference_predictor(batch)
+                        pred = vbd.inference_conditioner(batch)
                         # scores = pred['goal_scores'][0].softmax(dim=-1)
-                        goal_idx = pred['goal_scores'][0].argmax(-1)
-                        trajs = pred['goal_trajs'][0]
-                        # sampled_idx = torch.multinomial(scores, 1).squeeze()
-                        # pred_traj = trajs[torch.arange(sampled_idx.shape[0]), sampled_idx].cpu().numpy()
-                        pred_traj = trajs[torch.arange(goal_idx.shape[0]), goal_idx].cpu().numpy()
+                        scores = pred['cluster_scores'][0].softmax(-1)
+                        pred_traj = pred['coarse_global_trajs'].cpu().numpy()[0]
 
                     else:
                         raise NotImplementedError
@@ -214,7 +211,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_path', type=str, default=None)
     parser.add_argument('--model_path', type=str, default=None)
     parser.add_argument('--replan', type=int, default=10, help='Replan frequency')
-    parser.add_argument('--test_mode', type=str, default='prior')
+    parser.add_argument('--test_mode', type=str, default='diffusion')
     parser.add_argument('--save_simulation', action='store_true')
 
     args = parser.parse_args()
