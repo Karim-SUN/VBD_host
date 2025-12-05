@@ -121,8 +121,12 @@ class VBDTest(VBD):
             # 受控模式: 使用用户提供的意图
             intent_command = intent_command.to(self.device)
 
+        #    注意: 当 intent=0 时, dummy_indices=0, 取出的是 Cluster 0 的中心。
+        #    但 IntentConditioner 内部会根据 intent=0 自动忽略这个输入 (使用 global mean 或 null embedding)。
+        #    所以这里只要保证索引不越界即可
         dummy_indices = torch.clamp(intent_command, 0, self.num_clusters - 1)
         target_cluster_center_diffs = self.cluster_diffs[dummy_indices]
+
         conditioner_outputs = self.forward_conditioner(
             encoder_outputs, 
             intent_command, 
@@ -519,6 +523,7 @@ class VBDTest(VBD):
             x_t (torch.Tensor): The input tensor representing the current state. Shape: (num_batch, num_agent, num_action, action_dim)
             c (dict): The conditional variable dictionary.
             t (int): The number of diffusion steps.
+            anchor_diff: [重要] Denoiser 的基准 (Base), 在推理时这是 Conditioner 的输出 (coarse_diffs)
             
         Returns:
             denoiser_output (dict): The denoiser outputs.
@@ -549,7 +554,86 @@ class VBDTest(VBD):
         return denoiser_output, x_t_prev
     
     @torch.no_grad()
-    def sample_denoiser(self, batch, num_samples=1, x_t = None, use_tqdm = True, fix_t: int = -1, calc_loss: bool = False, **kwargs):
+    def sample_denoiser(self, batch, intent_command=None, num_samples=1, x_t=None, use_tqdm=True, fix_t: int = -1, **kwargs):
+        """
+        完整的扩散推理流程: Conditioner (粗解) -> Denoiser (精调)
+        """        
+        batch = self.batch_to_device(batch, self.device)
+        B = batch['agents_future'].shape[0]
+
+        # --- Stage 1: Conditioner (获取粗略轨迹) ---
+        # 如果提供了 intent_command, 则是受控生成; 否则是无条件预测
+        conditioner_outputs = self.inference_conditioner(batch, intent_command=intent_command)
+        
+        # 获取粗略轨迹差分 (Absolute Coarse Diffs)
+        # 这将作为 Denoiser 的 "Anchor" (基准)
+        pred_coarse_diff = conditioner_outputs['coarse_diffs'] # [B, A, 40, 2]
+        
+        
+        # --- Stage 2: Denoiser (精调残差) ---
+        
+        # 1. 确定维度
+        T_future_steps = self.num_diff_steps # 40
+        D_predict = self.diff_dim # 2
+        
+        # 2. 初始化噪声 x_T (Normalized Residual Space)
+        #    由于我们使用截断扩散 (Truncated Diffusion), 不需要从 t=1000 开始
+        #    只需从 t=50 (举例) 开始精调即可
+        start_step = self.noise_scheduler.num_steps * 1 // 20 # 50
+        
+        if x_t is None:
+            # 初始残差噪声
+            x_t = torch.randn(B, self._agents_len, T_future_steps, D_predict, device=self.device)
+        
+        # 3. 扩散时间步
+        # 确保包含 1, 以便最后一步能输出干净的结果
+        diffusion_steps = list(reversed(range(1, start_step + 1, self.skip)))
+
+        # History recording
+        denoiser_output_history = []
+        
+        # 复用 Encoder 输出以节省计算
+        encoder_outputs = self.encoder(batch)
+
+        if use_tqdm:
+            diffusion_steps_iter = tqdm(diffusion_steps, total=len(diffusion_steps), desc="Diffusion")
+        else:
+            diffusion_steps_iter = diffusion_steps
+
+        # 4. 循环去噪
+        for t in diffusion_steps_iter:
+            t_tensor = torch.full((B, self._agents_len), t, device=self.device, dtype=torch.long)
+            
+            # Step
+            # [关键] 传入 pred_coarse_diff 作为 anchor_diff
+            denoiser_outputs, x_t = self.step_denoiser(
+                x_t = x_t, 
+                c = encoder_outputs, 
+                t = t_tensor,
+                anchor_diff = pred_coarse_diff, 
+            )
+
+            # denoiser_outputs['denoised_local_trajs'] 是当前步估计的最终轨迹 (x0_hat + anchor)
+            denoiser_output_history.append(torch_dict_to_numpy(denoiser_outputs))
+            
+        # 5. 整理输出
+        # 最后一步的 denoiser_outputs 包含了最终的轨迹
+        final_output = denoiser_outputs
+        
+        final_output['history'] = {
+            'denoiser_output_history': stack_dict(denoiser_output_history),
+        }
+        
+        # 附带 Conditioner 的输出方便分析
+        final_output['conditioner_output'] = {
+            'coarse_local_trajs': conditioner_outputs['coarse_local_trajs'].cpu().numpy(),
+            'cluster_scores': conditioner_outputs['cluster_scores'].cpu().numpy(),
+        }
+        
+        return final_output
+    
+    @torch.no_grad()
+    def sample_denoiser_old(self, batch, num_samples=1, x_t = None, use_tqdm = True, fix_t: int = -1, calc_loss: bool = False, **kwargs):
         """
         Perform denoising inference on the given batch of data.
 

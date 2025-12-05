@@ -302,22 +302,22 @@ class VBD(pl.LightningModule):
             prediction_type=self._prediction_type
         )
         T_history_and_cur = encoder_outputs['T0']
-        current_states = encoder_outputs['agents_local'][:, :self._agents_len, T_history_and_cur - 1]
-        assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
+        current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
+        assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
         denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
         final_diff = denoised_offset + anchor_diff
-        denoised_trajs, denoised_trajs_origin = roll_out_new(
-            current_states, final_diff, global_frame=True, action_len=self._action_len
+        denoised_local_trajs, denoised_global_trajs = roll_out_new(
+            current_states, final_diff, action_len=self._action_len
         )
 
         return {
             'denoiser_output': denoiser_output,
             'denoised_offset': denoised_offset,
-            'denoised_local_trajs': denoised_trajs,
-            'denoised_trajs_origin': denoised_trajs_origin,
+            'denoised_local_trajs': denoised_local_trajs,
+            'denoised_global_trajs': denoised_global_trajs,
         }
 
     def forward_conditioner(self, encoder_outputs, intent_command, target_cluster_center_diffs):
@@ -359,12 +359,12 @@ class VBD(pl.LightningModule):
 
         # current_states = encoder_outputs['agents'][:, :self._agents_len, -1]
         T_history_and_cur = encoder_outputs['T0']
-        current_states = encoder_outputs['agents_local'][:, :self._agents_len, T_history_and_cur - 1]
-        assert encoder_outputs['agents_local'].shape[1] >= self._agents_len, 'Too many agents to consider'
+        current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
+        assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
         # Roll out
-        coarse_local_trajs, _ = roll_out_new(
-            current_states, coarse_diffs, global_frame=True, action_len=self._action_len
+        coarse_local_trajs, coarse_global_trajs = roll_out_new(
+            current_states, coarse_diffs, action_len=self._action_len
         )
 
         return {
@@ -372,6 +372,7 @@ class VBD(pl.LightningModule):
             'pred_norm_offsets': pred_norm_offsets,
             'coarse_diffs': coarse_diffs,
             'coarse_local_trajs': coarse_local_trajs,
+            'coarse_global_trajs': coarse_global_trajs,
             'cluster_scores': cluster_scores,
             'selected_std': self.std_uncond,
             'selected_prior': selected_prior,

@@ -238,7 +238,7 @@ def roll_out(
     return torch.stack([x, y, theta, v_x, v_y], dim=-1)
 
 
-def roll_out_new(
+def roll_out_new_old(
     current_states: torch.Tensor,
     traj_increments: torch.Tensor,
     global_frame: float = True,
@@ -297,100 +297,90 @@ def roll_out_new(
     return interpolated_traj, original_traj
 
 
-# def roll_out_new(
-#         current_states: torch.Tensor,
-#         traj_increments: torch.Tensor,
-#         global_frame: bool = True,
-#         delta_t: float = 0.2,
-#         local_increments: bool = False  # 新增参数，标记增量是否为局部坐标系
-# ):
-#     """
-#     Args:
-#         current_states: [B, N, 5] (x, y, theta, vx, vy)
-#         traj_increments: [B, N, T_f//T_a, 2] (delta_x, delta_y)
-#         global_frame: 是否使用全局坐标系输出
-#         delta_t: 时间步长
-#         local_increments: 增量是否为局部坐标系（需转换为全局坐标系）
-#     Returns:
-#         interpolated_traj: [B, N, T*2, 5]
-#         original_traj: [B, N, T_f//T_a, 5]
-#     """
-#     B, N, T, _ = traj_increments.shape
-#     device = traj_increments.device
-#
-#     # 初始状态
-#     x0, y0, theta0, vx0, vy0 = [current_states[..., i] for i in range(5)]
-#
-#     # --- 处理增量坐标系 ---
-#     if local_increments:
-#         # 将局部增量转换为全局增量
-#         theta_current = theta0.unsqueeze(-1)  # [B, N, 1]
-#         delta_x_local = traj_increments[..., 0]
-#         delta_y_local = traj_increments[..., 1]
-#
-#         # 转换为全局坐标系下的增量
-#         cos_theta = torch.cos(theta_current)
-#         sin_theta = torch.sin(theta_current)
-#         delta_x_global = delta_x_local * cos_theta - delta_y_local * sin_theta
-#         delta_y_global = delta_x_local * sin_theta + delta_y_local * cos_theta
-#
-#         traj_increments_global = torch.stack([delta_x_global, delta_y_global], dim=-1)
-#         traj_increments = traj_increments_global  # 更新为全局坐标系增量
-#
-#     # --- 原始轨迹累积增量 ---
-#     traj_cumsum = torch.cumsum(traj_increments, dim=-2)  # [B, N, T_f//T_a, 2]
-#
-#     # --- 插值部分（双倍步长）---
-#     interpolated_traj_cumsum = torch.zeros(B, N, T * 2, 2, device=device)
-#     interpolated_traj_cumsum[:, :, ::2] = traj_cumsum
-#     interpolated_traj_cumsum[:, :, 1:-1:2] = (traj_cumsum[:, :, 1:] + traj_cumsum[:, :, :-1]) / 2
-#     interpolated_traj_cumsum[:, :, -1] = 2 * traj_cumsum[:, :, -2] - traj_cumsum[:, :, -3]
-#
-#     # --- 计算航向角（基于全局增量）---
-#     theta_original = torch.atan2(traj_increments[..., 1], traj_increments[..., 0])  # [B, N, T_f//T_a]
-#     theta_interpolated = torch.atan2(interpolated_traj_cumsum[..., 1], interpolated_traj_cumsum[..., 0])  # [B, N, T*2]
-#
-#     # --- 速度计算（瞬时速度，插值后保持原值）---
-#     vx = traj_increments[..., 0] / delta_t  # [B, N, T_f//T_a]
-#     vy = traj_increments[..., 1] / delta_t
-#     vx_interpolated = vx.unsqueeze(2).repeat(1, 1, 2, 1).view(B, N, T * 2)  # 扩展为双倍步长
-#     vy_interpolated = vy.unsqueeze(2).repeat(1, 1, 2, 1).view(B, N, T * 2)
-#
-#     # --- 坐标系转换 ---
-#     if global_frame:
-#         # 插值轨迹
-#         x = x0.unsqueeze(-1) + interpolated_traj_cumsum[..., 0]
-#         y = y0.unsqueeze(-1) + interpolated_traj_cumsum[..., 1]
-#         theta = theta0.unsqueeze(-1) + theta_interpolated  # 若为局部增量，需重新计算
-#         vx_out = vx0.unsqueeze(-1) + vx_interpolated
-#         vy_out = vy0.unsqueeze(-1) + vy_interpolated
-#
-#         # 原始轨迹
-#         x_origin = x0.unsqueeze(-1) + traj_cumsum[..., 0]
-#         y_origin = y0.unsqueeze(-1) + traj_cumsum[..., 1]
-#         theta_origin = theta0.unsqueeze(-1) + theta_original
-#         vx_origin = vx0.unsqueeze(-1) + vx
-#         vy_origin = vy0.unsqueeze(-1) + vy
-#     else:
-#         # 插值轨迹
-#         x = interpolated_traj_cumsum[..., 0]
-#         y = interpolated_traj_cumsum[..., 1]
-#         theta = theta_interpolated
-#         vx_out = vx_interpolated
-#         vy_out = vy_interpolated
-#
-#         # 原始轨迹
-#         x_origin = traj_cumsum[..., 0]
-#         y_origin = traj_cumsum[..., 1]
-#         theta_origin = theta_original
-#         vx_origin = vx
-#         vy_origin = vy
-#
-#     # 拼接输出
-#     interpolated_traj = torch.stack([x, y, theta, vx_out, vy_out], dim=-1)  # [B, N, T*2, 5]
-#     original_traj = torch.stack([x_origin, y_origin, theta_origin, vx_origin, vy_origin], dim=-1)  # [B, N, T, 5]
-#
-#     return interpolated_traj, original_traj
+def roll_out_new(
+    current_states: torch.Tensor,
+    traj_increments: torch.Tensor,
+    action_len: int = 5
+):
+    """
+    根据轨迹增量和初始状态，推演局部轨迹和全局轨迹。
+    
+    Args:
+        current_states (torch.Tensor): 当前(初始)状态 [B, N, 5] 或 [B, N, 1, 5]。
+                                    格式: [x, y, theta, v_x, v_y]
+        traj_increments (torch.Tensor): 轨迹增量 (通常是局部坐标系下) [B, N, K, 2]。
+                                        格式: [delta_x, delta_y]
+        action_len (int): 每个增量持续的时间步长 (用于上采样)。
+
+    Returns:
+        local_traj (torch.Tensor): 局部坐标系下的完整轨迹 [B, N, T, 5]
+        global_traj (torch.Tensor): 全局坐标系下的完整轨迹 [B, N, T, 5]
+    """
+    
+    # 1. 解析初始状态
+    # 确保维度匹配，如果是 [B, N, 1, 5] 则去掉中间的维度
+    if current_states.dim() == 4 and current_states.shape[2] == 1:
+        current_states = current_states.squeeze(2)
+        
+    x0 = current_states[..., 0]      # [B, N]
+    y0 = current_states[..., 1]      # [B, N]
+    theta0 = current_states[..., 2]  # [B, N]
+    vx0 = current_states[..., 3]     # [B, N]
+    vy0 = current_states[..., 4]     # [B, N]
+
+    # 2. 处理增量 (Upsampling / Repeat)
+    # [B, N, K, 2] -> [B, N, K * action_len, 2]
+    # 这里假设 traj_increments 是每一步的位移 (delta_position)
+    traj_increments_expanded = traj_increments.repeat_interleave(action_len, dim=-2)
+    
+    # 3. 构建局部轨迹 (Local Trajectory)
+    # 在局部坐标系下，起始点通常认为是 (0, 0)，方向朝向 x轴正方向
+    local_x = torch.cumsum(traj_increments_expanded[..., 0], dim=-1) # [B, N, T]
+    local_y = torch.cumsum(traj_increments_expanded[..., 1], dim=-1) # [B, N, T]
+    
+    # 简单估算局部航向角 (通过 arctan2 计算位移向量的角度)
+    # 注意：这只是基于位移的瞬时航向，更严谨的做法是如果有 angular_rate 输出则积分
+    local_theta = torch.atan2(traj_increments_expanded[..., 1], traj_increments_expanded[..., 0])
+    
+    # 局部速度 (这里暂用增量大小表示速度，假设 dt=0.1，如果 dt!=0.1 需要除以 dt)
+    local_vx = traj_increments_expanded[..., 0] / 0.1
+    local_vy = traj_increments_expanded[..., 1] / 0.1
+
+    # 堆叠局部轨迹 [B, N, T, 5]
+    local_traj = torch.stack([local_x, local_y, local_theta, local_vx, local_vy], dim=-1)
+
+    # 4. 构建全局轨迹 (Global Trajectory) - 核心修正部分
+    # 需要将局部坐标 (local_x, local_y) 旋转 theta0 角度，然后平移 (x0, y0)
+    
+    # 准备旋转矩阵所需的 cos 和 sin，扩展维度以匹配时间 T
+    # theta0: [B, N] -> [B, N, 1]
+    c = torch.cos(theta0).unsqueeze(-1)
+    s = torch.sin(theta0).unsqueeze(-1)
+    
+    # 旋转公式 (2D 旋转矩阵):
+    # x_global = x_local * cos(theta) - y_local * sin(theta)
+    # y_global = x_local * sin(theta) + y_local * cos(theta)
+    
+    rotated_x = local_x * c - local_y * s
+    rotated_y = local_x * s + local_y * c
+    
+    # 平移
+    global_x = x0.unsqueeze(-1) + rotated_x
+    global_y = y0.unsqueeze(-1) + rotated_y
+    
+    # 航向角也需要加上初始角度
+    global_theta = local_theta + theta0.unsqueeze(-1)
+    # 归一化角度到 [-pi, pi]
+    global_theta = torch.atan2(torch.sin(global_theta), torch.cos(global_theta))
+    
+    # 速度向量也需要旋转 (将局部速度投影到全局坐标系)
+    global_vx = local_vx * c - local_vy * s
+    global_vy = local_vx * s + local_vy * c
+    
+    # 堆叠全局轨迹 [B, N, T, 5]
+    global_traj = torch.stack([global_x, global_y, global_theta, global_vx, global_vy], dim=-1)
+
+    return local_traj, global_traj
 
 
 class TrajectoryType:
