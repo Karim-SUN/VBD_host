@@ -133,7 +133,7 @@ class VBDTest(VBD):
             target_cluster_center_diffs
         )
         
-        return conditioner_outputs
+        return conditioner_outputs, encoder_outputs
     
     ################### Guidance ###################
     def ctg_guidance(self, x_t: torch.Tensor, c: dict, t: int, **kwargs) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, Dict[str, np.ndarray]]:
@@ -563,7 +563,7 @@ class VBDTest(VBD):
 
         # --- Stage 1: Conditioner (获取粗略轨迹) ---
         # 如果提供了 intent_command, 则是受控生成; 否则是无条件预测
-        conditioner_outputs = self.inference_conditioner(batch, intent_command=intent_command)
+        conditioner_outputs, encoder_outputs = self.inference_conditioner(batch, intent_command=intent_command)
         
         # 获取粗略轨迹差分 (Absolute Coarse Diffs)
         # 这将作为 Denoiser 的 "Anchor" (基准)
@@ -578,8 +578,8 @@ class VBDTest(VBD):
         
         # 2. 初始化噪声 x_T (Normalized Residual Space)
         #    由于我们使用截断扩散 (Truncated Diffusion), 不需要从 t=1000 开始
-        #    只需从 t=50 (举例) 开始精调即可
-        start_step = self.noise_scheduler.num_steps * 1 // 20 # 50
+        #    只需从 t=20 (举例) 开始精调即可
+        start_step = self.noise_scheduler.num_steps * 1 // 50 # 50
         
         if x_t is None:
             # 初始残差噪声
@@ -591,9 +591,6 @@ class VBDTest(VBD):
 
         # History recording
         denoiser_output_history = []
-        
-        # 复用 Encoder 输出以节省计算
-        encoder_outputs = self.encoder(batch)
 
         if use_tqdm:
             diffusion_steps_iter = tqdm(diffusion_steps, total=len(diffusion_steps), desc="Diffusion")
