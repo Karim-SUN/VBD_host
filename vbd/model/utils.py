@@ -23,13 +23,8 @@ def alpha_bar_cosine(time_step, s = 0.0, e = 1.0, tau=1.0, clip_min = 1e-9, **kw
     v_end = np.cos((e + 0.008) / 1.008 * np.pi / 2) ** (2*tau)
     v = np.cos((time_step * (e-s)+s + 0.008) / 1.008 * np.pi / 2) ** (2*tau)
     return np.clip((v_end - v) / (v_end - v_start), clip_min, 1)
-    # return np.cos((time_step + 0.008) / 1.008 * np.pi / 2) ** 2
-    
+
 def alpha_bar_log(time_step, tau = 2.5, clip_min = 1e-9, **kwargs):
-    # ! Hard code to shift the schedule 
-    # delta = 10**-tau
-    # return np.clip(np.log(time_step+delta)/np.log(delta), clip_min, 1)
-    
     delta = 10**-tau
     v_start = np.log(delta)
     v_end = np.log(1+delta)
@@ -48,14 +43,6 @@ def alpha_bar_sigmoid(time_step, s = -3, e = 3, tau=1, clip_min = 1e-9, **kwargs
     return np.clip((v_end - v) / (v_end - v_start), clip_min, 1)
 
 def get_beta_schedule(variant, num_diffusion_timesteps, clip_min = 1e-9, max_beta=0.999, scale = 1.0, **kwargs):
-    """
-    Create a beta schedule that discretizes the given alpha_t_bar function, which defines the cumulative product of
-    (1-beta) over time from t = [0,1].
-
-    Contains a function alpha_bar that takes an argument t and transforms it to the cumulative product of (1-beta) up
-    to that part of the diffusion process.
-    """
-
     if variant == 'cosine':
         alpha_bar = partial(alpha_bar_cosine, clip_min = clip_min, **kwargs)
     elif variant == 'log':
@@ -70,7 +57,7 @@ def get_beta_schedule(variant, num_diffusion_timesteps, clip_min = 1e-9, max_bet
         t1 = i / num_diffusion_timesteps
         t2 = (i + 1) / num_diffusion_timesteps
         betas.append(min(1 - alpha_bar(time_step = t2) / alpha_bar(time_step = t1), max_beta))
-    # betas[0] = betas[0]*(1-scale)
+    
     return torch.tensor(betas, dtype=torch.float32)
 
 class DDPM_Sampler(torch.nn.Module):
@@ -100,22 +87,19 @@ class DDPM_Sampler(torch.nn.Module):
         noise: torch.FloatTensor,
         timesteps: torch.IntTensor
     ):
-
         assert (timesteps < self.num_steps).all()
         
-        # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         alphas_cumprod = self.alphas_cumprod.to(device=original_samples.device, dtype=original_samples.dtype)
         timesteps = timesteps.to(original_samples.device)
 
+        # Broadcasting helper
         while len(timesteps.shape) < len(original_samples.shape):
             timesteps = timesteps.unsqueeze(-1)
             
         sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
-        
         sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
 
         noised_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
-        
         return noised_samples
     
     def get_noise(
@@ -127,23 +111,17 @@ class DDPM_Sampler(torch.nn.Module):
     ):
         assert (timesteps < self.num_steps).all()
         
-        # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         alphas_cumprod = self.alphas_cumprod.to(device=x_0.device, dtype=x_0.dtype)
         timesteps = timesteps.to(x_0.device)
 
         sqrt_alpha_prod = alphas_cumprod[timesteps] ** 0.5
-        # sqrt_alpha_prod = sqrt_alpha_prod.flatten()
-
         while len(sqrt_alpha_prod.shape) < len(x_0.shape):
             sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
 
         sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]) ** 0.5
-        # sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-
         while len(sqrt_one_minus_alpha_prod.shape) < len(x_0.shape):
             sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
 
-        # noised_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
         noise = (x_t - sqrt_alpha_prod * x_0) / sqrt_one_minus_alpha_prod
         
         if gt_noise is not None:
@@ -154,18 +132,13 @@ class DDPM_Sampler(torch.nn.Module):
         
         return noise, scaled_error
     
-    def set_timesteps(
-        self,
-        num_inference_steps = None,
-        device = None):
-
+    def set_timesteps(self, num_inference_steps=None, device=None):
         timesteps = (
             np.linspace(0, self.num_steps - 1, num_inference_steps)
             .round()[::-1]
             .copy()
             .astype(np.int64)
         )
-
         self.timesteps = torch.from_numpy(timesteps).to(device)
     
     def step(
@@ -175,30 +148,31 @@ class DDPM_Sampler(torch.nn.Module):
         sample: torch.FloatTensor,
         prediction_type: str = "sample"
     ):
-        """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-        """
         if not isinstance(timesteps, int):
-            while len(timesteps.shape) < len(model_output.shape):
+             timesteps = timesteps.to(sample.device)
+             while len(timesteps.shape) < len(model_output.shape):
                 timesteps = timesteps.unsqueeze(-1)
+
         # Compute predicted previous sample µ_t-1
         pred_prev_sample_mean = self.q_mean(model_output, timesteps, sample, prediction_type=prediction_type)
-        # 6. Add noise
+        
+        # Add noise
         device = model_output.device
         variance_noise = torch.randn(model_output.shape, device=device, dtype=model_output.dtype)
         
-        variance = (self.q_variance(timesteps)**0.5) * variance_noise
+        variance_std = self.q_variance(timesteps) ** 0.5
+        
+        # If t=0, variance should be 0 technically
+        if isinstance(timesteps, int):
+            if timesteps == 0:
+                variance_std = 0
+        else:
+            # Mask out variance for t=0
+            # Ensure safe broadcasting: variance_std should have same dims as timesteps
+            # timesteps is likely broadcasted (e.g., [B, 1, 1, 1])
+            variance_std = variance_std * (timesteps > 0).float()
 
-        pred_prev_sample = pred_prev_sample_mean + variance
+        pred_prev_sample = pred_prev_sample_mean + variance_std * variance_noise
 
         return pred_prev_sample
     
@@ -208,42 +182,29 @@ class DDPM_Sampler(torch.nn.Module):
         sample: torch.FloatTensor,
         prediction_type: str = "sample",
     ):
-        """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-        """
-        # if type(timestep) == int:
-        #     t = timestep
-        # else:
-        #     t = timestep[0][0]
-        prev_t = timesteps - 1
-        if isinstance(prev_t, int):
-            prev_t = max(prev_t, 0)
+        if isinstance(timesteps, int):
+            timesteps = torch.tensor([timesteps], device=sample.device, dtype=torch.long)
         else:
-            prev_t = prev_t.clamp(min=0)
-            while len(timesteps.shape) < len(model_output.shape):
-                timesteps = timesteps.unsqueeze(-1)
-                prev_t = prev_t.unsqueeze(-1)
+            timesteps = timesteps.to(sample.device)
         
-
-        # 1. Compute alphas, betas
         alpha_prod_t = self.alphas_cumprod[timesteps]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t] #if prev_t >= 0 else torch.tensor(1.0)
+        
+        prev_timesteps = torch.clamp(timesteps - 1, min=0)
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timesteps]
+        
+        mask_t0 = (timesteps == 0)
+        alpha_prod_t_prev = torch.where(mask_t0, torch.tensor(1.0).to(alpha_prod_t), alpha_prod_t_prev)
 
+        # Broadcasting to model_output shape
+        while len(alpha_prod_t.shape) < len(model_output.shape):
+            alpha_prod_t = alpha_prod_t.unsqueeze(-1)
+            alpha_prod_t_prev = alpha_prod_t_prev.unsqueeze(-1)
+            
         beta_prod_t = 1 - alpha_prod_t
         beta_prod_t_prev = 1 - alpha_prod_t_prev
         current_alpha_t = alpha_prod_t / alpha_prod_t_prev
         current_beta_t = 1 - current_alpha_t
 
-        # 2. Compute predicted original sample from predicted noise also called "predicted x_0"
         if prediction_type == "sample" or prediction_type == "mean":
             pred_original_sample = model_output
         elif prediction_type == "error":
@@ -253,15 +214,11 @@ class DDPM_Sampler(torch.nn.Module):
         else:
             raise NotImplementedError
 
-        # 3. Clip or threshold "predicted x_0"
         pred_original_sample = pred_original_sample.clamp(-self.clamp_val, self.clamp_val)
-        # samxple = sample.clamp(-self.clamp_val, self.clamp_val)
 
-        # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
         pred_original_sample_coeff = (alpha_prod_t_prev ** 0.5 * current_beta_t) / beta_prod_t
         current_sample_coeff = current_alpha_t ** 0.5 * beta_prod_t_prev / beta_prod_t 
 
-        # 5. Compute predicted previous sample µ_t
         pred_prev_sample_mean = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
         return pred_prev_sample_mean 
     
@@ -272,47 +229,45 @@ class DDPM_Sampler(torch.nn.Module):
         sample: torch.FloatTensor,
         prediction_type: str = "sample",
     ):
-        """
-        Predict the denoised x0 from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
+        if isinstance(timesteps, int):
+            timesteps = torch.tensor([timesteps], device=sample.device, dtype=torch.long)
+        else:
+            timesteps = timesteps.to(sample.device)
 
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-        """
-        
-
-        # 2. Compute predicted original sample from predicted noise also called "predicted x_0"
         if prediction_type == "sample" or prediction_type == "mean":
             pred_original_sample = model_output
         elif prediction_type == "error":
             alpha_prod_t = self.alphas_cumprod[timesteps]
-            for _ in range(len(sample.shape)-len(alpha_prod_t.shape)):
-                alpha_prod_t = alpha_prod_t[..., None]
+            while len(alpha_prod_t.shape) < len(sample.shape):
+                alpha_prod_t = alpha_prod_t.unsqueeze(-1)
             beta_prod_t = 1 - alpha_prod_t
             
             pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-        # elif prediction_type == "v":
-        #     pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
         else:
             raise NotImplementedError
 
         return pred_original_sample
 
     def q_variance(self, timesteps):
-        # if t == 0:
-        #     return 0
-        prev_t = timesteps - 1
-        if isinstance(prev_t, int):
-            prev_t = max(prev_t, 0)
+        # [Corrected] Removed the extra while loop at the end
+        if isinstance(timesteps, int):
+            timesteps = torch.tensor([timesteps], device=self.alphas_cumprod.device, dtype=torch.long)
         else:
-            prev_t = prev_t.clamp(min=0)
+            timesteps = timesteps.to(self.alphas_cumprod.device)
+            
         alpha_prod_t = self.alphas_cumprod[timesteps]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t]
+        
+        prev_timesteps = torch.clamp(timesteps - 1, min=0)
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timesteps]
+        
+        mask_t0 = (timesteps == 0)
+        alpha_prod_t_prev = torch.where(mask_t0, torch.tensor(1.0).to(alpha_prod_t), alpha_prod_t_prev)
+        
+        # Broadcasting here is generally not needed if timesteps is already broadcasted,
+        # but to be safe against 1D input:
+        # We rely on the caller (step) to handle shape broadcasting of timesteps BEFORE calling this, 
+        # or we accept that variance has same shape as timesteps.
+        
         beta_prod_t = 1 - alpha_prod_t
         beta_prod_t_prev = 1 - alpha_prod_t_prev
         current_alpha_t = alpha_prod_t / alpha_prod_t_prev
@@ -320,6 +275,7 @@ class DDPM_Sampler(torch.nn.Module):
         
         variance = beta_prod_t_prev / beta_prod_t * current_beta_t
         variance = torch.clamp(variance, min=1e-20)
+        
         return variance
         
 class DDIM_Sampler(DDPM_Sampler):
@@ -344,41 +300,39 @@ class DDIM_Sampler(DDPM_Sampler):
         prediction_type: str = "sample",
         eta: float = 0.0
     ):
-        """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-        """
         if not isinstance(timesteps, int):
-            while len(timesteps.shape) < len(model_output.shape):
+             timesteps = timesteps.to(sample.device)
+             while len(timesteps.shape) < len(model_output.shape):
                 timesteps = timesteps.unsqueeze(-1)
-        # Compute predicted previous sample µ_t-1
+                
         pred_prev_sample_mean = self.q_mean(model_output, timesteps, sample, prediction_type=prediction_type, eta=eta)
-        
         return pred_prev_sample_mean
     
     def q_variance(self, timestep, prev_timestep = None):
         if prev_timestep is None:
-            prev_timestep = timestep - 1
-        if isinstance(prev_timestep, int):
-            prev_timestep = max(prev_timestep, 0)
-        else:
-            prev_timestep = prev_timestep.clamp(min=0)
-            
-        alpha_prod_t = self.alphas_cumprod[timestep]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep]
-        beta_prod_t = 1 - alpha_prod_t
-        beta_prod_t_prev = 1 - alpha_prod_t_prev
-
-        variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
+            if isinstance(timestep, int):
+                prev_timestep = timestep - 1
+            else:
+                prev_timestep = timestep - 1
         
+        if isinstance(timestep, int):
+            ts = torch.tensor([timestep], device=self.alphas_cumprod.device)
+            prev_ts = torch.tensor([prev_timestep], device=self.alphas_cumprod.device)
+        else:
+            ts = timestep.to(self.alphas_cumprod.device)
+            prev_ts = prev_timestep.to(self.alphas_cumprod.device)
+
+        alpha_prod_t = self.alphas_cumprod[ts]
+        
+        safe_prev_indices = torch.clamp(prev_ts, min=0)
+        alpha_prod_t_prev = self.alphas_cumprod[safe_prev_indices]
+        
+        mask_negative = (prev_ts < 0)
+        alpha_prod_t_prev = torch.where(mask_negative, torch.tensor(1.0).to(alpha_prod_t), alpha_prod_t_prev)
+
+        beta_prod_t = 1 - alpha_prod_t
+
+        variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
         return variance
 
     def q_mean(self,
@@ -388,37 +342,27 @@ class DDIM_Sampler(DDPM_Sampler):
         prediction_type: str = "sample",
         eta = 0.0
     ):
-        """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-        """
-        prev_t = timesteps - 1
-        if isinstance(prev_t, int):
-            prev_t = max(prev_t, 0)
+        if isinstance(timesteps, int):
+            timesteps = torch.tensor([timesteps], device=sample.device, dtype=torch.long)
         else:
-            prev_t = prev_t.clamp(min=0)
-            while len(timesteps.shape) < len(model_output.shape):
-                timesteps = timesteps.unsqueeze(-1)
-                prev_t = prev_t.unsqueeze(-1)
+            timesteps = timesteps.to(sample.device)
+            
+        prev_t = timesteps - 1
+        
+        while len(timesteps.shape) < len(model_output.shape):
+            timesteps = timesteps.unsqueeze(-1)
+            prev_t = prev_t.unsqueeze(-1)
 
-        # 1. Compute alphas, betas
         alpha_prod_t = self.alphas_cumprod[timesteps]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t]
+        
+        safe_prev_indices = torch.clamp(prev_t, min=0)
+        alpha_prod_t_prev = self.alphas_cumprod[safe_prev_indices]
+        
+        mask_negative = (prev_t < 0)
+        alpha_prod_t_prev = torch.where(mask_negative, torch.tensor(1.0).to(alpha_prod_t), alpha_prod_t_prev)
 
         beta_prod_t = 1 - alpha_prod_t
-        # beta_prod_t_prev = 1 - alpha_prod_t_prev
-        # current_alpha_t = alpha_prod_t / alpha_prod_t_prev
-        # current_beta_t = 1 - current_alpha_t
 
-        # 2. Compute predicted original sample from predicted noise also called "predicted x_0"
         if prediction_type == "sample" or prediction_type == "mean":
             pred_original_sample = model_output
             pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
@@ -431,27 +375,24 @@ class DDIM_Sampler(DDPM_Sampler):
         else:
             raise NotImplementedError
 
-        # 3. Clip or threshold "predicted x_0"
         pred_original_sample = pred_original_sample.clamp(-self.clamp_val, self.clamp_val)
-        # pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
-        # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
         pred_original_sample_coeff = (alpha_prod_t_prev ** 0.5)
-        # current_sample_coeff = (1 - current_alpha_t) ** 0.5
         
-        # 5. compute variance: "sigma_t(η)" -> see formula (16)
-        # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
         variance = self.q_variance(timesteps, prev_t)
+        
+        # Safe broadcast for DDIM variance
+        while len(variance.shape) < len(model_output.shape):
+             variance = variance.unsqueeze(-1)
+
         std_dev_t = eta * variance ** (0.5)
         
-        # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-        pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
+        pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2).clamp(min=0) ** (0.5) * pred_epsilon
 
-
-        # 5. Compute predicted previous sample µ_t
         pred_prev_sample_mean = pred_original_sample_coeff * pred_original_sample + pred_sample_direction
+        
         if eta > 0.0:
             noise = torch.randn(model_output.shape, device=model_output.device, dtype=model_output.dtype)
-            pred_prev_sample_mean += std_dev_t* noise
+            pred_prev_sample_mean += std_dev_t * noise
             
         return pred_prev_sample_mean
