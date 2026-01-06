@@ -515,7 +515,7 @@ class VBDTest(VBD):
         return denoiser_output, x_t_prev, guide_history
     
     ################### Denoising ###################
-    def step_denoiser(self, x_t: torch.Tensor, c: dict, t: int, anchor_diff: torch.Tensor):
+    def step_denoiser(self, x_t: torch.Tensor, condition: dict, time_step: int, anchor_diff: torch.Tensor):
         """
         Perform a denoising step to sample x_{t-1} ~ P[x_{t-1} | x_t, D(x_t, c, t)].
         
@@ -535,9 +535,9 @@ class VBDTest(VBD):
         
         # Denoise to reconstruct x_0 ~ D(x_t, c, t)
         denoiser_output = self.forward_denoiser(
-            encoder_outputs=c,
+            encoder_outputs=condition,
             noised_inputs=x_t,
-            diffusion_step=t,
+            diffusion_step=time_step,
             anchor_diff=anchor_diff
         )
             
@@ -546,7 +546,7 @@ class VBDTest(VBD):
         # Step to sample from P(x_t-1 | x_t, x_0)
         x_t_prev = self.noise_scheduler.step(
             model_output = x_0,
-            timesteps = t,
+            timesteps = time_step,
             sample = x_t,
             prediction_type=self._prediction_type if hasattr(self, '_prediction_type') else 'sample',
         )
@@ -583,7 +583,31 @@ class VBDTest(VBD):
         
         if x_t is None:
             # 初始残差噪声
-            x_t = torch.randn(B, self._agents_len, T_future_steps, D_predict, device=self.device)
+            # A. 构造假设的完美残差 x_0 = 0
+            # 形状: [B, A, T, D]
+            x_0_dummy = torch.zeros(
+                B, self._agents_len, T_future_steps, D_predict, 
+                device=self.device, dtype=torch.float32
+            )
+            
+            # B. 构造标准高斯噪声 epsilon ~ N(0, I)
+            noise = torch.randn_like(x_0_dummy)
+            
+            # C. 构造时间步张量 t = start_step
+            # 注意: add_noise 内部会自动处理广播，但为了保险，我们构造 [B, A] 形状
+            t_tensor = torch.full(
+                (B, self._agents_len), start_step, 
+                device=self.device, dtype=torch.long
+            )
+            
+            # D. 调用 add_noise 计算 x_t
+            # x_t = sqrt(alpha_bar_t) * 0 + sqrt(1 - alpha_bar_t) * noise
+            # 结果即为自动缩放后的微弱噪声
+            x_t = self.noise_scheduler.add_noise(
+                original_samples=x_0_dummy,
+                noise=noise,
+                timesteps=t_tensor
+            )
         
         # 3. 扩散时间步
         # 确保包含 1, 以便最后一步能输出干净的结果
@@ -605,8 +629,8 @@ class VBDTest(VBD):
             # [关键] 传入 pred_coarse_diff 作为 anchor_diff
             denoiser_outputs, x_t = self.step_denoiser(
                 x_t = x_t, 
-                c = encoder_outputs, 
-                t = t_tensor,
+                condition = encoder_outputs, 
+                time_step = t_tensor,
                 anchor_diff = pred_coarse_diff, 
             )
 
