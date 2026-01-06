@@ -342,11 +342,11 @@ class VBD(pl.LightningModule):
         # 选择对应的标准差
         # 有条件 -> std_cond; 无条件 -> std_uncond
         # [B, A, 40, 2]
-        # selected_std = (self.std_cond * is_conditioned) + \
-        #                (self.std_uncond * (1.0 - is_conditioned))
+        selected_std = (self.std_cond * is_conditioned) + \
+                       (self.std_uncond * (1.0 - is_conditioned))
         
         # 反归一化：将网络输出还原为物理尺度
-        pred_offsets = pred_norm_offsets * self.std_uncond
+        pred_offsets = pred_norm_offsets * selected_std
 
         # 有条件 -> 簇中心; 无条件 -> 全局平均
         batch_mean_prior = self.global_mean_diff.expand_as(target_cluster_center_diffs)
@@ -374,7 +374,7 @@ class VBD(pl.LightningModule):
             'coarse_local_trajs': coarse_local_trajs,
             'coarse_global_trajs': coarse_global_trajs,
             'cluster_scores': cluster_scores,
-            'selected_std': self.std_uncond,
+            'selected_std': selected_std,
             'selected_prior': selected_prior,
         }
 
