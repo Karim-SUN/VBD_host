@@ -335,7 +335,7 @@ class Denoiser(nn.Module):
         self._action_len = action_len
         self._input_dim = input_dim
         self.noise_level_embedding = nn.Embedding(steps, 256)
-        self.decoder = TransformerDecoder(future_len, agents_len, self._action_len, input_dim=self._input_dim)
+        self.decoder = TransformerDecoder(future_len, agents_len, self._action_len, input_dim=self._input_dim, causal=False)
 
     def forward(self, encoder_inputs, noised_trajs, diffusion_step, rollout=True):
         '''
