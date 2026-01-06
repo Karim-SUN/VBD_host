@@ -565,7 +565,7 @@ class VBD(pl.LightningModule):
             # Inverse diffusion
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
-                                                     best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
+                                                    balanced_diff_input.view(B, self._agents_len, -1, self.diff_dim))
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_local_trajs']: B, A_pred, T_future, 5
