@@ -5,8 +5,8 @@ model_name: VBD
 # val_data_path: /home/huang/Mount_Disk/shy/vbd_dataset/val/processed
 # anchor_path: /home/huang/Mount_Disk/shy/VBD/vbd/data/cluster_64_center_dict.pkl
 # log_dir: ./train_log
-train_data_path: /media/karim/PortableSSD/train_processed
-val_data_path: /media/karim/PortableSSD/val_processed
+train_data_path: /media/karim/PortableSSD/train_processed/processed
+val_data_path: /media/karim/PortableSSD/val_processed/processed
 anchor_path: vbd/data/16384.npy
 cluster_path: vbd/data/clusters_nms.pkl
 log_dir: ./train_log
@@ -14,7 +14,7 @@ log_dir: ./train_log
 # Wandb Config
 use_wandb: True
 username: karim-sun
-project: vbd
+project: vbd_temp
 wandb_dir: ./wandb_logs # 自定义wandb日志的根目录
 
 # Checkpoint Config
@@ -90,12 +90,12 @@ focused_rank_topk: 5
 use_hinge_loss: False
 soft_hinge_loss_weight: 0.1
 
-bce_loss_weight: 0.5
-goal_loss_weight: 15
+bce_loss_weight: 0.8
+goal_loss_weight: 2.0
 score_loss_weight: 0.8
 predictor_loss_weight: 1.0
 
-traj_loss_weight: 80.0
+traj_loss_weight: 100.0
 denoise_loss_weight: 1.0
 denoiser_loss_weight: 0.8
 
