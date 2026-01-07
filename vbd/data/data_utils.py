@@ -247,7 +247,10 @@ def data_process_agent(
     else:
         log_trajectory = scenario.sim_trajectory
     metadata = scenario.object_metadata
-    sdc_id = np.where(metadata.is_sdc)[0][0]
+    try:
+        sdc_id = np.where(metadata.is_sdc)[0][0]
+    except IndexError:
+        sdc_id = 0
 
     # calculate distance to sdc
     if selected_agents is None:

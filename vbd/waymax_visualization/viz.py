@@ -181,13 +181,16 @@ def plot_trajectory(
     for i in range(num_obj):
       if not traj.valid[i, time_idx]:
         continue
+      text = 'ego' if is_ego[0] == i else f'{indices[i]}'
+      text_color = COLOR_DICT['ego'] * 0.8 if is_ego[0] == i else COLOR_DICT['context'] * 0.8
       ax.text(
           traj_5dof[i, time_idx, 0] - 2,
-          traj_5dof[i, time_idx, 1] + 2,
-          f'{indices[i]}',
+          traj_5dof[i, time_idx, 1] + 3,
+          text,
           zorder=10,
           clip_on=True,
           fontsize = 14,
+          color=text_color
       )
 
   _plot_bounding_boxes(ax, traj_5dof, time_idx, is_controlled, traj.valid, is_ego, is_adv)  # pytype: disable=wrong-arg-types  # jax-ndarray

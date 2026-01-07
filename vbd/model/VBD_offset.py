@@ -55,6 +55,8 @@ class VBD(pl.LightningModule):
         self._weight_end = cfg.get('weight_end', 0.0)
         self._weight_anneal_steps = cfg.get('weight_anneal_steps', 10000)
 
+        self._offset_std = cfg.get('offset_std', 2.0)
+
         self.score_loss_type = cfg.get('score_loss_type', 'bce')
         self.bce_loss_weight = cfg.get('bce_loss_weight', 0.5)
 
@@ -305,9 +307,12 @@ class VBD(pl.LightningModule):
         current_states = encoder_outputs['agents'][:, :self._agents_len, T_history_and_cur - 1]
         assert encoder_outputs['agents'].shape[1] >= self._agents_len, 'Too many agents to consider'
 
+        # denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
+        denoised_offset = denoised_offset_norm * self._offset_std
+
         # Roll out
         # When using decoder to predict the offset, the denoised_trajs is the original anchors + offset
-        denoised_offset = self.unnormalize_anchor_increments(denoised_offset_norm)
+
         final_diff = denoised_offset + anchor_diff
         denoised_local_trajs, denoised_global_trajs = roll_out_new(
             current_states, final_diff, action_len=self._action_len
@@ -342,11 +347,11 @@ class VBD(pl.LightningModule):
         # 选择对应的标准差
         # 有条件 -> std_cond; 无条件 -> std_uncond
         # [B, A, 40, 2]
-        # selected_std = (self.std_cond * is_conditioned) + \
-        #                (self.std_uncond * (1.0 - is_conditioned))
+        selected_std = (self.std_cond * is_conditioned) + \
+                       (self.std_uncond * (1.0 - is_conditioned))
         
         # 反归一化：将网络输出还原为物理尺度
-        pred_offsets = pred_norm_offsets * self.std_uncond
+        pred_offsets = pred_norm_offsets * selected_std
 
         # 有条件 -> 簇中心; 无条件 -> 全局平均
         batch_mean_prior = self.global_mean_diff.expand_as(target_cluster_center_diffs)
@@ -374,7 +379,7 @@ class VBD(pl.LightningModule):
             'coarse_local_trajs': coarse_local_trajs,
             'coarse_global_trajs': coarse_global_trajs,
             'cluster_scores': cluster_scores,
-            'selected_std': self.std_uncond,
+            'selected_std': selected_std,
             'selected_prior': selected_prior,
         }
 
@@ -551,7 +556,8 @@ class VBD(pl.LightningModule):
 
             noise = torch.randn_like(target_anchor_to_gt_local_diff_offset) # B, A_pred, T_future_steps, 2
 
-            target_offset_norm = self.normalize_anchor_increments(target_anchor_to_gt_local_diff_offset)
+            # target_offset_norm = self.normalize_anchor_increments(target_anchor_to_gt_local_diff_offset)
+            target_offset_norm = target_anchor_to_gt_local_diff_offset / self._offset_std
 
             noised_target_offset_norm = self.noise_scheduler.add_noise(
                 target_offset_norm,
@@ -565,7 +571,7 @@ class VBD(pl.LightningModule):
             # Inverse diffusion
             denoise_outputs = self.forward_denoiser(encoder_outputs, noised_target_offset_norm,
                                                     diffusion_steps.view(B, self._agents_len), 
-                                                     best_anchor_diff.view(B, self._agents_len, -1, self.diff_dim))
+                                                    balanced_diff_input.view(B, self._agents_len, -1, self.diff_dim))
             # denoise_outputs['denoiser_output']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_offset']: B, A_pred, T_future_steps, 2
             # denoise_outputs['denoised_local_trajs']: B, A_pred, T_future, 5

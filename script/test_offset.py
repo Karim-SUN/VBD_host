@@ -39,7 +39,8 @@ from vbd.data.waymax_utils import create_iter
 ## Parameters
 CURRENT_TIME_INDEX = 10
 N_SIM_AGENTS = 8
-N_SIMULATION_STEPS = 80
+TRAIN_HISTORY_LEN = 11
+N_SIMULATION_STEPS = 40
 
 
 ## Set up Waynax Environment
@@ -85,6 +86,7 @@ def calculate_metrics(metrics, modeled_indices):
             kin.append((metrics[t]['kinematic_infeasibility'].value[i]).item())
             wrw.append((metrics[t]['wrong_way'].value[i]).item())
 
+        log_divergence.append(np.mean(div))
         collision.append(np.any(col) if not is_collision else False)
         offroad.append(np.any(off) if not is_offroad else False)
         wrong_way.append(np.sum(wrw) > 10)
@@ -129,17 +131,22 @@ def run_simulation(args):
         writer.writerow(['scenario_id', 'collision', 'offroad', 'wrong_way', 
                         'log_divergence', 'kinematic_infeasibility'])
 
+    scenerio_count = 0
     # Begin simulation
     for scenario_id, scenario in tqdm(data_iter):  
-        print(f"Running scenario {scenario_id}...")
+        scenerio_count += 1
+        print(f"Running No.{scenerio_count} scenario {scenario_id}...")
         initial_state = current_state = env.reset(scenario)
         log_states = [initial_state]
         log_metrics = []    
         is_valid = scenario.object_metadata.is_valid
         is_controlled = is_valid[:N_SIM_AGENTS]
 
+        pred_list = []
+
         # Run the simulated scenarios.
-        for t in (range(initial_state.remaining_timesteps)):
+        # for t in (range(initial_state.remaining_timesteps)):
+        for t in (range(N_SIMULATION_STEPS)):
             i = t % args.replan
 
             if i == 0:
@@ -149,13 +156,16 @@ def run_simulation(args):
                     sample = dataset.process_scenario(current_state, current_state.timestep, use_log=False)
                     batch = dataset.__collate_fn__([sample])
 
+                    current_history_len = batch['agents_history'].shape[2]
+                    if current_history_len > TRAIN_HISTORY_LEN:
+                        batch['agents_history'] = batch['agents_history'][:, :, -TRAIN_HISTORY_LEN:, :]
+
                     if args.test_mode == 'diffusion':
                         pred = vbd.sample_denoiser(batch)
                         pred_traj = pred['denoised_global_trajs'].cpu().numpy()[0]
 
                     elif args.test_mode == 'prior':
-                        pred = vbd.inference_conditioner(batch)
-                        # scores = pred['goal_scores'][0].softmax(dim=-1)
+                        pred, _ = vbd.inference_conditioner(batch)
                         scores = pred['cluster_scores'][0].softmax(-1)
                         pred_traj = pred['coarse_global_trajs'].cpu().numpy()[0]
 
@@ -166,6 +176,7 @@ def run_simulation(args):
             action = sample_to_action(sample, is_controlled, None, N_SIM_AGENTS)
             current_state = env.step_sim_agent(current_state, [action])
             log_states.append(current_state)
+            pred_list.append(pred_traj)
 
             # Run metrics
             overlap = OverlapMetric().compute(current_state)
@@ -194,11 +205,18 @@ def run_simulation(args):
         if args.save_simulation:
             sim_images = []
             for state in log_states:
-                img = plot_state(state)
+                try:
+                    sdc_id = np.where(state.object_metadata.is_sdc)[0][0]
+                except IndexError:
+                    sdc_id = 0
+                img = plot_state(state, traj_preds=pred_list[0], center_agent_idx=sdc_id, cmap='viridis', is_ego=[sdc_id])
                 sim_images.append(img)
 
             with open(os.path.join(SAVE_PATH, f'{scenario_id}_sim.pkl'), 'wb') as f:
                 pickle.dump(state.sim_trajectory, f)
+
+            # save first image
+            plt.imsave(os.path.join(SAVE_PATH, f'{scenario_id}_sim.png'), sim_images[0])
 
             with mediapy.set_show_save_dir(SAVE_PATH):
                 mediapy.show_video(sim_images, title=f'{scenario_id}', fps=10)

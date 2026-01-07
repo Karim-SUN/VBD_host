@@ -133,7 +133,7 @@ class VBDTest(VBD):
             target_cluster_center_diffs
         )
         
-        return conditioner_outputs
+        return conditioner_outputs, encoder_outputs
     
     ################### Guidance ###################
     def ctg_guidance(self, x_t: torch.Tensor, c: dict, t: int, **kwargs) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, Dict[str, np.ndarray]]:
@@ -515,7 +515,7 @@ class VBDTest(VBD):
         return denoiser_output, x_t_prev, guide_history
     
     ################### Denoising ###################
-    def step_denoiser(self, x_t: torch.Tensor, c: dict, t: int, anchor_diff: torch.Tensor):
+    def step_denoiser(self, x_t: torch.Tensor, condition: dict, time_step: int, anchor_diff: torch.Tensor):
         """
         Perform a denoising step to sample x_{t-1} ~ P[x_{t-1} | x_t, D(x_t, c, t)].
         
@@ -535,9 +535,9 @@ class VBDTest(VBD):
         
         # Denoise to reconstruct x_0 ~ D(x_t, c, t)
         denoiser_output = self.forward_denoiser(
-            encoder_outputs=c,
+            encoder_outputs=condition,
             noised_inputs=x_t,
-            diffusion_step=t,
+            diffusion_step=time_step,
             anchor_diff=anchor_diff
         )
             
@@ -546,7 +546,7 @@ class VBDTest(VBD):
         # Step to sample from P(x_t-1 | x_t, x_0)
         x_t_prev = self.noise_scheduler.step(
             model_output = x_0,
-            timesteps = t,
+            timesteps = time_step,
             sample = x_t,
             prediction_type=self._prediction_type if hasattr(self, '_prediction_type') else 'sample',
         )
@@ -563,7 +563,7 @@ class VBDTest(VBD):
 
         # --- Stage 1: Conditioner (获取粗略轨迹) ---
         # 如果提供了 intent_command, 则是受控生成; 否则是无条件预测
-        conditioner_outputs = self.inference_conditioner(batch, intent_command=intent_command)
+        conditioner_outputs, encoder_outputs = self.inference_conditioner(batch, intent_command=intent_command)
         
         # 获取粗略轨迹差分 (Absolute Coarse Diffs)
         # 这将作为 Denoiser 的 "Anchor" (基准)
@@ -578,12 +578,36 @@ class VBDTest(VBD):
         
         # 2. 初始化噪声 x_T (Normalized Residual Space)
         #    由于我们使用截断扩散 (Truncated Diffusion), 不需要从 t=1000 开始
-        #    只需从 t=50 (举例) 开始精调即可
-        start_step = self.noise_scheduler.num_steps * 1 // 20 # 50
+        #    只需从 t=20 (举例) 开始精调即可
+        start_step = self.noise_scheduler.num_steps * 1 // 50 # 50
         
         if x_t is None:
             # 初始残差噪声
-            x_t = torch.randn(B, self._agents_len, T_future_steps, D_predict, device=self.device)
+            # A. 构造假设的完美残差 x_0 = 0
+            # 形状: [B, A, T, D]
+            x_0_dummy = torch.zeros(
+                B, self._agents_len, T_future_steps, D_predict, 
+                device=self.device, dtype=torch.float32
+            )
+            
+            # B. 构造标准高斯噪声 epsilon ~ N(0, I)
+            noise = torch.randn_like(x_0_dummy)
+            
+            # C. 构造时间步张量 t = start_step
+            # 注意: add_noise 内部会自动处理广播，但为了保险，我们构造 [B, A] 形状
+            t_tensor = torch.full(
+                (B, self._agents_len), start_step, 
+                device=self.device, dtype=torch.long
+            )
+            
+            # D. 调用 add_noise 计算 x_t
+            # x_t = sqrt(alpha_bar_t) * 0 + sqrt(1 - alpha_bar_t) * noise
+            # 结果即为自动缩放后的微弱噪声
+            x_t = self.noise_scheduler.add_noise(
+                original_samples=x_0_dummy,
+                noise=noise,
+                timesteps=t_tensor
+            )
         
         # 3. 扩散时间步
         # 确保包含 1, 以便最后一步能输出干净的结果
@@ -591,9 +615,6 @@ class VBDTest(VBD):
 
         # History recording
         denoiser_output_history = []
-        
-        # 复用 Encoder 输出以节省计算
-        encoder_outputs = self.encoder(batch)
 
         if use_tqdm:
             diffusion_steps_iter = tqdm(diffusion_steps, total=len(diffusion_steps), desc="Diffusion")
@@ -608,8 +629,8 @@ class VBDTest(VBD):
             # [关键] 传入 pred_coarse_diff 作为 anchor_diff
             denoiser_outputs, x_t = self.step_denoiser(
                 x_t = x_t, 
-                c = encoder_outputs, 
-                t = t_tensor,
+                condition = encoder_outputs, 
+                time_step = t_tensor,
                 anchor_diff = pred_coarse_diff, 
             )
 

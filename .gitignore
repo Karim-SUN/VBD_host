@@ -3,6 +3,7 @@
 
 # Logs and training artifacts
 train_log/
+testing_results/
 wandb/
 *.log
 logs/
