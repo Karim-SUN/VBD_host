@@ -161,10 +161,12 @@ def run_simulation(args):
                         batch['agents_history'] = batch['agents_history'][:, :, -TRAIN_HISTORY_LEN:, :]
 
                     if args.test_mode == 'diffusion':
+                        print("Test Mode: Diffusion")
                         pred = vbd.sample_denoiser(batch)
                         pred_traj = pred['denoised_global_trajs'].cpu().numpy()[0]
 
                     elif args.test_mode == 'prior':
+                        print("Test Mode: Prior")
                         pred, _ = vbd.inference_conditioner(batch)
                         scores = pred['cluster_scores'][0].softmax(-1)
                         pred_traj = pred['coarse_global_trajs'].cpu().numpy()[0]

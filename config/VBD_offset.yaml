@@ -49,11 +49,13 @@ weight_anneal_steps: 4400
 
 # Diffusion Params
 diffusion_steps: 1000
-#schedule_type: cosine  $$$
 schedule_type: log
 schedule_s: 0
 schedule_e: 1
 schedule_tau: 1
+sampler_type: ddpm
+ddim_eta: 0.0
+inference_skip: 1
 
 action_mean: [0.0, 0.0]
 # action_std: [1.0, 0.15]
