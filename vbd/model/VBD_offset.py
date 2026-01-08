@@ -134,8 +134,9 @@ class VBD(pl.LightningModule):
     ################### Training Setup ###################
     def configure_optimizers(self):
         '''
-        This function is called by Lightning to create the optimizer and learning rate scheduler.
+        配置优化器和学习率调度器：实现 SGDR + Peak Decay + Soft Restart
         '''
+        # 1. 冻结不需要训练的模块 (保持原逻辑不变)
         if not self._train_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
@@ -148,33 +149,85 @@ class VBD(pl.LightningModule):
 
         params_to_update = []
         for param in self.parameters():
-            # if param.requires_grad == True:
-            #     params_to_update.append(param)
-            params_to_update.append(param)
+            if param.requires_grad: # 确保只添加需要梯度的参数
+                params_to_update.append(param)
 
         assert len(params_to_update) > 0, 'No parameters to update'
 
-        optimizer = bnb_optim.AdamW8bit(  # 使用 8-bit 版本
+        optimizer = bnb_optim.AdamW8bit(
             params_to_update,
             lr=self.cfg['lr'],
             weight_decay=self.cfg['weight_decay']
         )
 
-        warmup_steps = self.cfg['lr_warmup_step'] // self.accumulate_grad_batches
-        total_steps = self.cfg['lr_total_steps'] // self.accumulate_grad_batches
-        end_factor = self.cfg.get('lr_end_factor', 0.01)
+        # 2. 获取基础调度参数
+        accumulate = self.accumulate_grad_batches
+        warmup_steps = self.cfg['lr_warmup_step'] // accumulate
+        # total_steps 虽然在 lambda 中没直接用到，但用于计算 epoch 进度等
+        # total_steps = self.cfg['lr_total_steps'] // accumulate 
+        
+        # 3. 获取 SGDR 参数 (建议在 yaml 中配置，这里提供了默认值)
+        # 注意：cycle_len 也需要除以 accumulate，因为它是基于 step 计数的
+        cycle_len = self.cfg.get('sgdr_cycle_len', 800) // accumulate
+        cycle_mult = self.cfg.get('sgdr_cycle_mult', 1.5)
+        decay_rate = self.cfg.get('sgdr_decay_rate', 0.85)
+        min_lr_scale = self.cfg.get('sgdr_min_lr_scale', 0.01)
+        cycle_warmup_ratio = self.cfg.get('sgdr_cycle_warmup_ratio', 0.1)
 
         def lr_lambda(current_step: int):
+            # A. 全局预热 (Global Warmup)
+            # 训练最开始的线性预热
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             
-            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            # B. SGDR 阶段计算
+            step_after_warmup = current_step - warmup_steps
             
-            # Cosine annealing schedule
-            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            current_cycle_len = cycle_len
+            cycle_idx = 0
+            time_in_cycle = step_after_warmup
             
-            # Mix with linear decay to the end_factor
-            return (1.0 - end_factor) * cosine_decay + end_factor
+            # 迭代计算当前处于第几个周期，以及周期内的相对位置
+            while time_in_cycle >= current_cycle_len:
+                time_in_cycle -= current_cycle_len
+                current_cycle_len = int(current_cycle_len * cycle_mult)
+                cycle_idx += 1
+            
+            # C. 峰值衰减 (Peak Decay)
+            # 随着周期数增加，最高 LR 逐渐降低
+            peak_scale = decay_rate ** cycle_idx
+            
+            # D. 周期内调度逻辑
+            
+            # Case 1: 第 0 个周期 (Cycle 0)
+            # 紧接在 Global Warmup 之后 (此时 LR=1.0)，因此不需要 Soft Restart
+            # 直接从最高点开始进行余弦衰减，实现平滑过渡
+            if cycle_idx == 0:
+                progress = float(time_in_cycle) / float(max(1, current_cycle_len))
+                cosine_value = 0.5 * (1.0 + math.cos(math.pi * progress))
+                final_scale = peak_scale * cosine_value
+            
+            # Case 2: 后续周期 (Cycle > 0)
+            # 经过了上一个周期的低谷，需要 Soft Restart (周期内热身) 重新拉高 LR
+            else:
+                cycle_warmup_steps = int(current_cycle_len * cycle_warmup_ratio)
+                
+                if time_in_cycle < cycle_warmup_steps:
+                    # 周期内热身阶段: 0 -> Peak
+                    restart_progress = float(time_in_cycle) / float(max(1, cycle_warmup_steps))
+                    final_scale = peak_scale * restart_progress
+                else:
+                    # 周期内衰减阶段: Peak -> 0
+                    # 有效衰减时间 = 总长 - 热身长
+                    decay_steps = current_cycle_len - cycle_warmup_steps
+                    time_in_decay = time_in_cycle - cycle_warmup_steps
+                    
+                    progress = float(time_in_decay) / float(max(1, decay_steps))
+                    cosine_value = 0.5 * (1.0 + math.cos(math.pi * progress))
+                    final_scale = peak_scale * cosine_value
+            
+            # E. 最低 LR 保护
+            return max(final_scale, min_lr_scale)
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -347,8 +400,9 @@ class VBD(pl.LightningModule):
         # 选择对应的标准差
         # 有条件 -> std_cond; 无条件 -> std_uncond
         # [B, A, 40, 2]
-        selected_std = (self.std_cond * is_conditioned) + \
-                       (self.std_uncond * (1.0 - is_conditioned))
+        # selected_std = (self.std_cond * is_conditioned) + \
+        #                (self.std_uncond * (1.0 - is_conditioned))
+        selected_std = self.std_uncond
         
         # 反归一化：将网络输出还原为物理尺度
         pred_offsets = pred_norm_offsets * selected_std
@@ -491,7 +545,7 @@ class VBD(pl.LightningModule):
 
             target_offset = (gt_future_local_diff - selected_prior) * diff_valid_mask.float()
             target_norm_offset = target_offset / selected_std
-            target_norm_offset = torch.clamp(target_norm_offset, min=-5.0, max=5.0)
+            target_norm_offset = torch.clamp(target_norm_offset, min=-3.0, max=3.0)
 
             coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_norm_offsets, cluster_scores, 
                                               target_norm_offset, target_cluster_indices,

@@ -12,7 +12,7 @@ log_dir: ./train_log
 # Wandb Config
 use_wandb: True
 username: karim-sun
-project: vbd
+project: vbd_temp
 wandb_dir: ./wandb_logs # 自定义wandb日志的根目录
 
 # Checkpoint Config
@@ -25,7 +25,7 @@ action_len: 1
 encoder_layers: 6
 
 # Encoder
-history_dropout: 0.4
+history_dropout: 0.5
 
 # Task Probabilities for get_random_mask
 intent_dropout: 0.4
@@ -73,6 +73,14 @@ epochs: 10
 lr_warmup_step: 7000
 lr_total_steps: 97420 # 估算的总训练步数 (例如: epochs * steps/epoch)
 lr_end_factor: 0.025 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
+
+# SGDR Schedule Config
+sgdr_cycle_len: 800         # 初始周期长度 (建议设为总步数的 1/6)
+sgdr_cycle_mult: 1.5        # 周期倍增因子 (1.5 表示每个周期变长 1.5 倍)
+sgdr_decay_rate: 0.85       # 峰值衰减率 (每次重启打 85 折)
+sgdr_min_lr_scale: 0.01     # 最低学习率比例
+sgdr_cycle_warmup_ratio: 0.1 # 周期内热身比例 (10% 的时间用来软重启)
+
 precision: "bf16-mixed"
 random_target: 0.1
 
