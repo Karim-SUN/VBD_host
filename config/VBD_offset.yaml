@@ -27,7 +27,7 @@ action_len: 1
 encoder_layers: 6
 
 # Encoder
-history_dropout: 0.2
+history_dropout: 0.5
 
 # Task Probabilities for get_random_mask
 intent_dropout: 0.4

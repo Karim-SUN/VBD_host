@@ -103,6 +103,15 @@ for k in range(K):
             linewidth=2.5, 
             alpha=0.8, 
             linestyle='--')
+    end_x, end_y = center_traj[-1, 0], center_traj[-1, 1]
+    
+    ax.text(end_x, end_y, 
+            str(k),                # 标注文本
+            color='black',         # 字体颜色，也可以改成 'red' 等以示区分
+            fontsize=12,           # 字号
+            fontweight='bold',     # 加粗
+            ha='center', va='center', # 水平垂直居中
+            zorder=10)             # 确保文字显示在图层最上方
 
 # 4. 设置图表属性
 ax.set_xlabel("X Coordinate", fontsize=12)
