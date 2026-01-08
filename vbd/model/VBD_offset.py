@@ -400,8 +400,9 @@ class VBD(pl.LightningModule):
         # 选择对应的标准差
         # 有条件 -> std_cond; 无条件 -> std_uncond
         # [B, A, 40, 2]
-        selected_std = (self.std_cond * is_conditioned) + \
-                       (self.std_uncond * (1.0 - is_conditioned))
+        # selected_std = (self.std_cond * is_conditioned) + \
+        #                (self.std_uncond * (1.0 - is_conditioned))
+        selected_std = self.std_uncond
         
         # 反归一化：将网络输出还原为物理尺度
         pred_offsets = pred_norm_offsets * selected_std
@@ -544,7 +545,7 @@ class VBD(pl.LightningModule):
 
             target_offset = (gt_future_local_diff - selected_prior) * diff_valid_mask.float()
             target_norm_offset = target_offset / selected_std
-            target_norm_offset = torch.clamp(target_norm_offset, min=-5.0, max=5.0)
+            target_norm_offset = torch.clamp(target_norm_offset, min=-3.0, max=3.0)
 
             coarse_traj_loss, cluster_score_loss = self.goal_loss(coarse_norm_offsets, cluster_scores, 
                                               target_norm_offset, target_cluster_indices,
