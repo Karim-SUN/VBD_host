@@ -12,7 +12,7 @@ log_dir: ./train_log
 # Wandb Config
 use_wandb: True
 username: karim-sun
-project: vbd_temp
+project: vbd
 wandb_dir: ./wandb_logs # 自定义wandb日志的根目录
 
 # Checkpoint Config
@@ -41,9 +41,9 @@ encoder_version: v3 # v1: GRU, v2: MLP, v3: Self-Attention
 
 # Weight Annealing
 balanced_input: prob # 'no', 'prob', 'linear'
-weight_start: 0.8
+weight_start: 1.0
 weight_end: 0.0
-weight_anneal_steps: 70000
+weight_anneal_steps: 100000
 
 # Diffusion Params
 diffusion_steps: 1000
@@ -66,18 +66,18 @@ anchor_incre_max: [3.5, 2]
 seed: 21
 batch_size: 10
 num_workers: 32
-accumulate_grad_batches: 4 # 会影响实际的lr steps等
+accumulate_grad_batches: 6 # 会影响实际的lr steps等
 lr: 0.0002 # 0.0002
 weight_decay: 0.01
-epochs: 10
-lr_warmup_step: 7000
-lr_total_steps: 97420 # 估算的总训练步数 (例如: epochs * steps/epoch)
-lr_end_factor: 0.025 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
+epochs: 16
+lr_warmup_step: 15000
+lr_total_steps: 155872 # 估算的总训练步数 (例如: epochs * steps/epoch)
+lr_end_factor: 0.01 # 学习率最终衰减到的比例 (initial_lr * lr_end_factor)
 
 # SGDR Schedule Config
-sgdr_cycle_len: 800         # 初始周期长度 (建议设为总步数的 1/6)
+sgdr_cycle_len: 140872         # 初始周期长度 (建议设为总步数的 1/6)
 sgdr_cycle_mult: 1.5        # 周期倍增因子 (1.5 表示每个周期变长 1.5 倍)
-sgdr_decay_rate: 0.85       # 峰值衰减率 (每次重启打 85 折)
+sgdr_decay_rate: 0.75       # 峰值衰减率 (每次重启打多少折)
 sgdr_min_lr_scale: 0.01     # 最低学习率比例
 sgdr_cycle_warmup_ratio: 0.1 # 周期内热身比例 (10% 的时间用来软重启)
 
