@@ -3,7 +3,7 @@ import torch
 import bitsandbytes.optim as bnb_optim
 import lightning.pytorch as pl
 from .modules_offset import Encoder, Denoiser, IntentConditioner
-from .utils import DDPM_Sampler
+from .utils import DDPM_Sampler, DDIM_Sampler
 from .model_utils_new import (inverse_kinematics, roll_out, 
                               batch_transform_trajs_to_global_frame,
                               batch_transform_trajs_to_local_frame,
@@ -41,6 +41,8 @@ class VBD(pl.LightningModule):
         self._agents_len = cfg['agents_len']
         self._action_len = cfg['action_len']
         self._diffusion_steps = cfg['diffusion_steps']
+        self._sampler_type = cfg.get('sampler_type', 'ddim')
+        self._ddim_eta = cfg.get('ddim_eta', 0.0)
         self._encoder_layers = cfg['encoder_layers']
         self._encoder_version = cfg.get('encoder_version', 'v1')
         self._action_mean = cfg['action_mean']
@@ -119,14 +121,28 @@ class VBD(pl.LightningModule):
             self.predictor = None
             self._train_predictor = False
 
-        self.noise_scheduler = DDPM_Sampler(
-            steps=self._diffusion_steps,
-            schedule=self._schedule_type,
-            s=cfg.get('schedule_s', 0.0),
-            e=cfg.get('schedule_e', 1.0),
-            tau=cfg.get('schedule_tau', 1.0),
-            scale=cfg.get('schedule_scale', 1.0),
-        )
+        # 根据配置选择 Sampler
+        if self._sampler_type == 'ddim':
+            print(f"Using DDIM Sampler (eta={self._ddim_eta})")
+            self.noise_scheduler = DDIM_Sampler(
+                steps=self._diffusion_steps,
+                schedule=self._schedule_type,
+                s=cfg.get('schedule_s', 0.0),
+                e=cfg.get('schedule_e', 1.0),
+                tau=cfg.get('schedule_tau', 1.0),
+                scale=cfg.get('schedule_scale', 1.0),
+                clamp_val=cfg.get('clamp_value', 5.0)
+            )
+        else:
+            print("Using DDPM Sampler")
+            self.noise_scheduler = DDPM_Sampler(
+                steps=self._diffusion_steps,
+                schedule=self._schedule_type,
+                s=cfg.get('schedule_s', 0.0),
+                e=cfg.get('schedule_e', 1.0),
+                tau=cfg.get('schedule_tau', 1.0),
+                scale=cfg.get('schedule_scale', 1.0),
+            )
 
         self.register_buffer('action_mean', torch.tensor(self._action_mean))
         self.register_buffer('action_std', torch.tensor(self._action_std))

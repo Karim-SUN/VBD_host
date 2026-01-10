@@ -42,7 +42,7 @@ class VBDTest(VBD):
         
         # Parameters for the denoiser sampling
         self.early_stop = early_stop
-        self.skip = skip
+        self.skip = cfg.get('inference_skip', skip)
         
         # Parameters for the guidance function
         self.reward_func = reward_func
@@ -515,7 +515,7 @@ class VBDTest(VBD):
         return denoiser_output, x_t_prev, guide_history
     
     ################### Denoising ###################
-    def step_denoiser(self, x_t: torch.Tensor, condition: dict, time_step: int, anchor_diff: torch.Tensor):
+    def step_denoiser(self, x_t: torch.Tensor, condition: dict, time_step: int, anchor_diff: torch.Tensor, prev_time_step: int = None):
         """
         Perform a denoising step to sample x_{t-1} ~ P[x_{t-1} | x_t, D(x_t, c, t)].
         
@@ -542,14 +542,23 @@ class VBDTest(VBD):
         )
             
         x_0 = denoiser_output['denoiser_output']
+
+        # 准备 step 的参数
+        step_kwargs = {
+            'model_output': x_0,
+            'timesteps': time_step,
+            'sample': x_t,
+            'prediction_type': self._prediction_type if hasattr(self, '_prediction_type') else 'sample'
+        }
+
+        # 如果是 DDIM，需要传入 eta
+        if self.noise_scheduler._sampler_name == 'ddim':
+            # 从 cfg 获取 eta，默认为 0.0
+            step_kwargs['eta'] = getattr(self, '_ddim_eta', 0.0)
+            step_kwargs['prev_timesteps'] = prev_time_step
         
         # Step to sample from P(x_t-1 | x_t, x_0)
-        x_t_prev = self.noise_scheduler.step(
-            model_output = x_0,
-            timesteps = time_step,
-            sample = x_t,
-            prediction_type=self._prediction_type if hasattr(self, '_prediction_type') else 'sample',
-        )
+        x_t_prev = self.noise_scheduler.step(**step_kwargs)
                     
         return denoiser_output, x_t_prev
     
@@ -611,7 +620,10 @@ class VBDTest(VBD):
         
         # 3. 扩散时间步
         # 确保包含 1, 以便最后一步能输出干净的结果
-        diffusion_steps = list(reversed(range(1, start_step + 1, self.skip)))
+        diffusion_steps = list(range(start_step + 1, 1, -self.skip))
+        # 确保包含最后一步 (例如 1)
+        if diffusion_steps[-1] != 1:
+            diffusion_steps.append(1)
 
         # History recording
         denoiser_output_history = []
@@ -622,8 +634,15 @@ class VBDTest(VBD):
             diffusion_steps_iter = diffusion_steps
 
         # 4. 循环去噪
-        for t in diffusion_steps_iter:
+        for i, t in enumerate(diffusion_steps_iter):
             t_tensor = torch.full((B, self._agents_len), t, device=self.device, dtype=torch.long)
+
+            # 如果是最后一步，prev_t 应该是 0 (或 -1, 取决于你的边界处理，这里建议0代表x0态)
+            if i < len(diffusion_steps) - 1:
+                next_t_val = diffusion_steps[i+1]
+            else:
+                next_t_val = 0 # 最终步
+            prev_t_tensor = torch.full((B, self._agents_len), next_t_val, device=self.device, dtype=torch.long)
             
             # Step
             # [关键] 传入 pred_coarse_diff 作为 anchor_diff
@@ -632,6 +651,7 @@ class VBDTest(VBD):
                 condition = encoder_outputs, 
                 time_step = t_tensor,
                 anchor_diff = pred_coarse_diff, 
+                prev_time_step = prev_t_tensor
             )
 
             # denoiser_outputs['denoised_local_trajs'] 是当前步估计的最终轨迹 (x0_hat + anchor)
@@ -653,170 +673,3 @@ class VBDTest(VBD):
         
         return final_output
     
-    @torch.no_grad()
-    def sample_denoiser_old(self, batch, num_samples=1, x_t = None, use_tqdm = True, fix_t: int = -1, calc_loss: bool = False, **kwargs):
-        """
-        Perform denoising inference on the given batch of data.
-
-        Args:
-            batch (dict): The input batch of data.
-            guidance_func (callable, optional): A callable function that provides guidance for denoising. Defaults to None.
-            early_stop (int, optional): The index of the step at which denoising should stop. Defaults to 0.
-            skip (int, optional): The number of steps to skip between denoising iterations. Defaults to 1.
-            **kwargs: Additional keyword arguments for guidance.
-        Returns:
-            dict: The denoising outputs, including the history of noised action normalization.
-
-        """        
-        # Encode the scene 
-        batch = self.batch_to_device(batch, self.device)
-
-        # data inputs
-        agents_future = batch['agents_future']
-        batch['anchors'] = self.anchor_tensor.unsqueeze(0).unsqueeze(0).expand(agents_future.shape[0], self._agents_len, -1, -1, -1)
-
-        agents_future_valid = torch.ne(agents_future.sum(-1), 0)
-        agents_future_valid = agents_future_valid[:, :, 1].unsqueeze(-1).expand_as(
-            agents_future_valid) & agents_future_valid
-        agents_interested = batch['agents_interested']
-        anchors = batch['anchors']
-
-        B, A_pred, Q, T_future_and_cur, D_predict = anchors.shape
-        T_future_steps = T_future_and_cur // self._action_len
-
-        # --- 数据拼接：将历史和未来轨迹拼接为 agent 特征 ---
-        agents_history = batch['agents_history']
-        agents_features = torch.cat((agents_history[:, :, :-1, :5], agents_future[..., :5]), dim=-2)
-        batch['agents_features'] = agents_features
-        T_history_and_cur = agents_history.shape[-2]
-        batch['T_history_and_cur'] = T_history_and_cur
-        batch['T_history_and_cur'] = agents_history.shape[-2]
-
-        # Try to calculate loss
-        if calc_loss:
-            agents_future = batch['agents_future'][:, :self._agents_len]
-            agents_future_valid = torch.ne(agents_future.sum(-1), 0)
-            agents_interested = batch['agents_interested'][:, :self._agents_len]
-        
-        encoder_outputs = self.encoder(batch)
-
-        agents_future = agents_future[:, :self._agents_len]
-        agents_future_valid = agents_future_valid[:, :self._agents_len]
-        agents_interested = agents_interested[:, :self._agents_len]
-
-        # Motion Prior Prediction
-        goal_outputs = self.forward_predictor(encoder_outputs)
-        goal_scores = goal_outputs['goal_scores']
-        goal_trajs = goal_outputs['goal_trajs']
-
-        # get predicted anchor
-        assert goal_scores != None, 'No valid goal predictions yet.'
-        B_idx = torch.arange(B).unsqueeze(1)  # 生成形状为 [B, 1] 的批次索引
-        A_idx = torch.arange(self._agents_len).unsqueeze(0)  # 生成形状为 [1, A] 的车辆索引
-        goal_index = goal_scores.argmax(-1)
-
-        # batch_index_mask = torch.rand(B) < 0.999
-        # random_index = torch.randint(0, 20, goal_index.shape).to(goal_index.device)
-        # goal_index[batch_index_mask] = random_index[batch_index_mask]
-
-        target_anchors_gt = anchors[B_idx, A_idx, goal_index, :, :]  # 索引数据
-        pred_anchor_diff = torch.diff(target_anchors_gt[:, :, ::2, :], dim=-2)  # 计算相邻锚点的差值
-
-        # Calc Noise
-        diffusion_steps = torch.full(
-            size=(B, self._agents_len, 1, 1),
-            fill_value=self.noise_scheduler.num_steps * 1 // 100,
-            device=agents_future.device,
-            dtype=torch.long
-        )
-        # random_diffusion_steps = torch.randint(
-        #     1, self.noise_scheduler.num_steps // 2, (B,),
-        #     device=agents_future.device
-        # ).long().unsqueeze(-1).repeat(1, A).view(B, A, 1, 1) + self.noise_scheduler.num_steps // 2
-        # diffusion_steps[batch_index_mask] = random_diffusion_steps[batch_index_mask]
-
-        noise = torch.randn(B, self._agents_len, T_future_steps, D_predict).type_as(agents_future)
-
-        x_t = self.noise_scheduler.add_noise(
-            torch.zeros_like(pred_anchor_diff).type_as(pred_anchor_diff),  # .reshape(B*A, T, D),
-            noise,
-            diffusion_steps  # , .reshape(B*A),
-        )
-        # x_t = torch.clamp(x_t, min=-1, max=1)
-        
-        if num_samples > 1:
-            encoder_outputs = duplicate_batch(encoder_outputs, num_samples)
-            
-        agents_history = encoder_outputs['agents']
-        num_batch, num_agent = agents_history.shape[:2]
-        num_step = self._future_len//self._action_len
-        action_dim = 2
-        
-        # diffusion_steps = list(reversed(range(self.early_stop, self.noise_scheduler.num_steps * 1 // 10, self.skip)))
-        diffusion_steps = list(reversed(range(0, self.noise_scheduler.num_steps * 1 // 100 + 1, self.skip)))
-
-        # History
-        x_t_history = []
-        denoiser_output_history = []
-        guide_history = []
-
-        if use_tqdm:
-            diffusion_steps = tqdm(diffusion_steps, total=len(diffusion_steps), desc="Diffusion")
-
-        for t in diffusion_steps:
-            x_t_history.append(x_t.detach().cpu().numpy())
-            
-            if t <= self.guidance_start and t >= self.guidance_end and \
-                    self.guidance_func is not None and \
-                    self.reward_func is not None:
-                    
-                denoiser_outputs, x_t, guide = self.guidance_func(
-                    x_t = x_t,
-                    c = encoder_outputs,
-                    t = t,
-                    **kwargs
-                )
-                guide_history.append(guide)
-            else:
-                if t <= 1:
-                    pass
-                denoiser_outputs, x_t = self.step_denoiser(
-                    x_t = x_t, 
-                    c = encoder_outputs, 
-                    t = fix_t if fix_t >= 0 else t,
-                    anchor_diff = pred_anchor_diff,
-                )
-                guide = None
-
-            # Calculate the loss and metrics
-            if calc_loss: 
-                denoised_trajs = denoiser_outputs['denoised_trajs']
-                
-                state_loss_mean, yaw_loss_mean = self.denoise_loss(
-                    denoised_trajs,
-                    agents_future, agents_future_valid,
-                    agents_interested,
-                )
-                
-                denoise_ade, denoise_fde = self.calculate_metrics_denoise(
-                    denoised_trajs, agents_future, agents_future_valid, agents_interested, 8
-                )
-                
-                denoiser_outputs.update(
-                    {
-                        'state_loss_mean': state_loss_mean,
-                        'yaw_loss_mean': yaw_loss_mean,
-                        'denoise_ade': denoise_ade,
-                        'denoise_fde': denoise_fde,
-                    }
-                )
-            
-            denoiser_output_history.append(torch_dict_to_numpy(denoiser_outputs))
-            
-        denoiser_outputs['history'] = {
-            'x_t_history': np.stack(x_t_history, axis=0),
-            'denoiser_output_history': stack_dict(denoiser_output_history),
-            'guide_history': stack_dict(guide_history),
-        }
-        
-        return denoiser_outputs

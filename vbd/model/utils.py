@@ -66,6 +66,7 @@ class DDPM_Sampler(torch.nn.Module):
         clamp_val: float = 5.0, **kwargs
     ):
         super().__init__()
+        self._sampler_name = 'ddpm'
         self.num_steps = steps
         self.schedule = schedule
         self.clamp_val = clamp_val
@@ -279,8 +280,9 @@ class DDPM_Sampler(torch.nn.Module):
         return variance
         
 class DDIM_Sampler(DDPM_Sampler):
-    def __init__(self, steps=100, schedule='cosine', clamp_val: float = 5.0):
-        super().__init__(steps, schedule, clamp_val)
+    def __init__(self, steps=100, schedule='cosine', clamp_val: float = 5.0, **kwargs):
+        super().__init__(steps, schedule, clamp_val, **kwargs)
+        self._sampler_name = 'ddim'
         
     def copy_from_ddpm(self, ddpm: DDPM_Sampler):
         self.num_steps = ddpm.num_steps
@@ -298,29 +300,33 @@ class DDIM_Sampler(DDPM_Sampler):
         timesteps: Union[int, torch.IntTensor],
         sample: torch.FloatTensor,
         prediction_type: str = "sample",
-        eta: float = 0.0
+        eta: float = 0.0,
+        prev_timesteps: Union[int, torch.IntTensor] = None
     ):
         if not isinstance(timesteps, int):
              timesteps = timesteps.to(sample.device)
              while len(timesteps.shape) < len(model_output.shape):
                 timesteps = timesteps.unsqueeze(-1)
                 
-        pred_prev_sample_mean = self.q_mean(model_output, timesteps, sample, prediction_type=prediction_type, eta=eta)
+        pred_prev_sample_mean = self.q_mean(model_output, timesteps, sample, 
+                                            prediction_type=prediction_type, 
+                                            eta=eta, 
+                                            prev_timesteps=prev_timesteps)
         return pred_prev_sample_mean
     
-    def q_variance(self, timestep, prev_timestep = None):
-        if prev_timestep is None:
+    def q_variance(self, timestep, prev_timesteps = None):
+        if prev_timesteps is None:
             if isinstance(timestep, int):
-                prev_timestep = timestep - 1
+                prev_timesteps = timestep - 1
             else:
-                prev_timestep = timestep - 1
+                prev_timesteps = timestep - 1
         
         if isinstance(timestep, int):
             ts = torch.tensor([timestep], device=self.alphas_cumprod.device)
-            prev_ts = torch.tensor([prev_timestep], device=self.alphas_cumprod.device)
+            prev_ts = torch.tensor([prev_timesteps], device=self.alphas_cumprod.device)
         else:
             ts = timestep.to(self.alphas_cumprod.device)
-            prev_ts = prev_timestep.to(self.alphas_cumprod.device)
+            prev_ts = prev_timesteps.to(self.alphas_cumprod.device)
 
         alpha_prod_t = self.alphas_cumprod[ts]
         
@@ -340,17 +346,26 @@ class DDIM_Sampler(DDPM_Sampler):
         timesteps: Union[int, torch.IntTensor],
         sample: torch.FloatTensor,
         prediction_type: str = "sample",
-        eta = 0.0
+        eta = 0.0,
+        prev_timesteps = None
     ):
         if isinstance(timesteps, int):
             timesteps = torch.tensor([timesteps], device=sample.device, dtype=torch.long)
         else:
             timesteps = timesteps.to(sample.device)
             
-        prev_t = timesteps - 1
+        if prev_timesteps is None:
+            prev_t = timesteps - 1
+        else:
+            if isinstance(prev_timesteps, int):
+                prev_t = torch.tensor([prev_timesteps], device=sample.device, dtype=torch.long)
+            else:
+                prev_t = prev_timesteps.to(sample.device)
         
         while len(timesteps.shape) < len(model_output.shape):
             timesteps = timesteps.unsqueeze(-1)
+            
+        while len(prev_t.shape) < len(model_output.shape):
             prev_t = prev_t.unsqueeze(-1)
 
         alpha_prod_t = self.alphas_cumprod[timesteps]
